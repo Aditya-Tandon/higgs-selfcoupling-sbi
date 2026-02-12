@@ -216,6 +216,8 @@ def compute_part_scores(
     """
     Run ParT inference on jet constituents to get b-tagging scores.
 
+    Note: This function expects pre-prepared inputs from parT_helpers.prepare_part_inputs
+
     Args:
         jet_constituents: numpy array (N_jets, N_constituents, N_features)
         particle_masks: numpy array (N_jets, N_constituents) boolean mask
