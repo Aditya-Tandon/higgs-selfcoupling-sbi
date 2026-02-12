@@ -43,7 +43,7 @@ events = load_and_prepare_data(
     file_pattern,
     config["tree_name"],
     collections,
-    max_events=1000,
+    max_events=None,
     correct_pt=True,
     CONFIG=config,
 )
