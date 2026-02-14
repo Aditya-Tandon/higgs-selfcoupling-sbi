@@ -123,10 +123,18 @@ axes2[0].set_title("Reconstructed Higgs Masses")
 axes2[0].set_xlim(0, 500)
 axes2[0].set_ylim(0, 500)
 
-axes2[1].hist2d(features["m_hh"], features["pt_hh"], bins=50, cmap="viridis")
+axes2[1].hist2d(
+    features["m_hh"],
+    features["pt_hh"],
+    bins=50,
+    cmap="viridis",
+    range=[[0, 1000], [0, 500]],
+)
 axes2[1].set_xlabel("$m_{HH}$ [GeV]")
 axes2[1].set_ylabel("$p_T^{HH}$ [GeV]")
 axes2[1].set_title("$m_{HH}$ vs $p_T^{HH}$")
+axes2[1].set_xlim(0, 1000)
+axes2[1].set_ylim(0, 500)
 plt.colorbar(axes2[1].collections[0], ax=axes2[1], label="Events")
 
 plt.tight_layout()
