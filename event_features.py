@@ -175,6 +175,9 @@ def load_part_model(checkpoint_path, config_path=None):
     """
     Load trained ParT model for b-tagging.
 
+    Handles both raw state_dict and training checkpoint format
+    (which stores state_dict under 'model_state_dict' key).
+
     Args:
         checkpoint_path: path to .pth file
         config_path: optional path to config JSON
@@ -192,19 +195,26 @@ def load_part_model(checkpoint_path, config_path=None):
     with open(config_path) as f:
         config = json.load(f)
 
+    # Model hyperparams may be in a 'model' sub-dict (from training config)
+    model_cfg = config.get("model", config)
+
     # Initialize model
     model = ParticleTransformer(
-        input_dim=config["input_dim"],
-        embed_dim=config.get("embed_dim", 128),
-        num_heads=config.get("num_heads", 8),
-        num_layers=config.get("num_layers", 8),
-        num_cls_layers=config.get("num_cls_layers", 2),
-        dropout=config.get("dropout", 0.1),
-        num_classes=config.get("num_classes", 1),
+        input_dim=config.get("input_dim", 17),
+        embed_dim=model_cfg.get("embed_dim", 128),
+        num_heads=model_cfg.get("num_heads", 8),
+        num_layers=model_cfg.get("num_layers", 8),
+        num_cls_layers=model_cfg.get("num_cls_layers", 2),
+        dropout=model_cfg.get("dropout", 0.1),
+        num_classes=model_cfg.get("num_classes", 1),
     )
 
-    # Load weights
-    model.load_state_dict(torch.load(checkpoint_path, map_location="cpu"))
+    # Load weights - handle both raw state_dict and training checkpoint
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+        model.load_state_dict(ckpt["model_state_dict"])
+    else:
+        model.load_state_dict(ckpt)
     model.eval()
 
     return model

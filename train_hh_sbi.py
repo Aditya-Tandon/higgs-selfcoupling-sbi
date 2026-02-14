@@ -541,7 +541,9 @@ def main():
     parser = argparse.ArgumentParser(description="HH SBI Training")
     parser.add_argument("--mode", choices=["closure", "full"], default="closure")
     parser.add_argument(
-        "--tagger", default="offline_pnet", choices=["offline_pnet", "l1_ng", "l1_ext"]
+        "--tagger",
+        default="offline_pnet",
+        choices=["offline_pnet", "l1_ng", "l1_ext", "part_l1"],
     )
     parser.add_argument("--n-kl-points", type=int, default=9)
     parser.add_argument("--n-events", type=int, default=5000)

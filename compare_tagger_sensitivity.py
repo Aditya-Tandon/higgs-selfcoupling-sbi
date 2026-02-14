@@ -39,6 +39,7 @@ TAGGERS = {
     "offline_pnet": {"label": "Offline PNet", "color": "#2196F3", "marker": "o"},
     "l1_ext": {"label": "L1 Ext", "color": "#FF5722", "marker": "s"},
     "l1_ng": {"label": "L1 NG", "color": "#4CAF50", "marker": "^"},
+    "part_l1": {"label": "ParT (L1)", "color": "#9C27B0", "marker": "D"},
 }
 
 
