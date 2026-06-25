@@ -1,7 +1,7 @@
 {
     "physics": {
         "luminosity_fb": 1000,
-        "signal_xsec_pb": 0.0113,
+        "signal_xsec_pb": 0.01244,
         "n_gen_signal": 50000
     },
     "file_pattern": "/Users/adityatandon/Documents/College/Physics/Year 4/Neural SBI/root-obj-perf/data/hh4b/data_*.root",
@@ -18,7 +18,7 @@
         "collection_name": "Jet",
         "tagger_name": "btagPNetB",
         "cvb_tagger_name": "btagPNetCvB",
-        "b_tag_cut": 0.8893,
+        "b_tag_cut": 0.1055,
         "charm_veto_cut": 1.0,
         "electron_veto_cut": 1.0,
         "muon_veto_cut": 1.0,
@@ -40,7 +40,7 @@
         "collection_name": "L1puppiJetSC4NG",
         "tagger_name": "b_v_udscg_score",
         "cvb_tagger_name": "c_v_b_score",
-        "b_tag_cut": 0.2400,
+        "b_tag_cut": 0.1774,
         "charm_veto_cut": 1.0,
         "electron_veto_cut": 1.0,
         "muon_veto_cut": 1.0,
@@ -50,7 +50,7 @@
     "l1ext": {
         "collection_name": "L1puppiExtJetSC4",
         "tagger_name": "btagScore",
-        "b_tag_cut": 0.73780,
+        "b_tag_cut": 0.7379,
         "pt_cut": 25.0,
         "eta_cut": 2.4
     },

@@ -125,7 +125,7 @@ def plot_roc_comparison(roc_results, working_point=None, title="", return_fig=Fa
 
     if title == "":
         title = "ROC Curve Comparison: Offline vs. L1 B-Tagging"
-    ax.set_ylabel("B-Tagging Efficiency")
+    ax.set_ylabel("$b$-Tagging Efficiency")
     ax.set_xlabel("Mistag Rate")
     ax.set_xscale("log")
     ax.set_xlim(1e-4, 1.0)

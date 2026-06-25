@@ -88,16 +88,21 @@ def process_signal(config, tagger_defs, eta_cut):
         eta_ok = _eta_mask(jets, eta_cut)
         jets_cut = jets[eta_ok]
 
-        matched_mask = get_purity_mask_cross_matched(gen_b, jets_cut, CONFIG=config)
+        matched_mask, gen_idx = get_purity_mask_cross_matched(gen_b, jets_cut, CONFIG=config)
 
         scores = _flatten(getattr(jets_cut, tagger_field)[matched_mask])
         pt = _flatten(jets_cut.pt[matched_mask])
         eta = _flatten(jets_cut.eta[matched_mask])
 
+        gen_pt_lookup = gen_b_quarks.pt[gen_idx]
+        gen_pt_per_jet = ak.fill_none(ak.where(matched_mask, gen_pt_lookup, 0.0), 0.0)
+        gen_pt = ak.to_numpy(ak.flatten(gen_pt_per_jet, axis=1))
+
         result[label] = {
             "sig_scores": scores,
             "sig_pt": pt,
             "sig_eta": eta,
+            "sig_gen_pt": gen_pt,
         }
         print(f"  [{label}] {len(scores)} signal jets cached")
 
@@ -120,7 +125,7 @@ def process_qcd(config, tagger_defs, eta_cut):
 
     # Accumulators per tagger
     accum = {
-        td[0]: {"scores": [], "labels": [], "pt": [], "eta": [], "weights": []}
+        td[0]: {"scores": [], "labels": [], "pt": [], "eta": [], "weights": [], "gen_pt": []}
         for td in tagger_defs
     }
 
@@ -156,7 +161,7 @@ def process_qcd(config, tagger_defs, eta_cut):
             eta_ok = _eta_mask(jets, eta_cut)
             jets_cut = jets[eta_ok]
 
-            matched_mask = get_purity_mask_cross_matched(gen_b, jets_cut, CONFIG=config)
+            matched_mask, gen_idx = get_purity_mask_cross_matched(gen_b, jets_cut, CONFIG=config, return_gen_idx=True)
 
             flat_scores = _flatten(getattr(jets_cut, tagger_field))
             flat_labels = _flatten(ak.values_astype(matched_mask, np.float32))
@@ -164,9 +169,14 @@ def process_qcd(config, tagger_defs, eta_cut):
             flat_eta = _flatten(jets_cut.eta)
             flat_weights = np.full(len(flat_scores), sigma_bin, dtype=np.float64)
 
+            gen_pt_lookup = gen_b_quarks.pt[gen_idx]
+            gen_pt_per_jet = ak.fill_none(ak.where(matched_mask, gen_pt_lookup, 0.0), 0.0)
+            gen_pt = ak.to_numpy(ak.flatten(gen_pt_per_jet, axis=1))
+
             accum[label]["scores"].append(flat_scores)
             accum[label]["labels"].append(flat_labels)
             accum[label]["pt"].append(flat_pt)
+            accum[label]["gen_pt"].append(gen_pt)
             accum[label]["eta"].append(flat_eta)
             accum[label]["weights"].append(flat_weights)
 
@@ -187,6 +197,7 @@ def process_qcd(config, tagger_defs, eta_cut):
                 "qcd_pt": np.array([], dtype=np.float32),
                 "qcd_eta": np.array([], dtype=np.float32),
                 "qcd_weights": np.array([], dtype=np.float64),
+                "qcd_gen_pt": np.array([], dtype=np.float32),
             }
         else:
             result[label] = {
@@ -195,6 +206,7 @@ def process_qcd(config, tagger_defs, eta_cut):
                 "qcd_pt": np.concatenate(accum[label]["pt"]),
                 "qcd_eta": np.concatenate(accum[label]["eta"]),
                 "qcd_weights": np.concatenate(accum[label]["weights"]),
+                "qcd_gen_pt": np.concatenate(accum[label]["gen_pt"]),
             }
         n_total = len(result[label]["qcd_scores"])
         n_b = int(result[label]["qcd_labels"].sum())
