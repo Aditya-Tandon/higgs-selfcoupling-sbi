@@ -1,18 +1,25 @@
 """
-kappa_lambda NSBI closure test (iteration 1).
+kappa_lambda NSBI closure test.
 
-Pipeline under test: analytic LO reweighting -> parameterized SNRE-B ratio
-estimator -> unbinned profile-likelihood scan -> kl recovery + coverage.
+Pipeline: analytic LO reweighting -> parameterized CARL ratio estimator (weighted) ->
+unbinned profile-likelihood scan -> SBC-calibrated 68% interval -> recovery + coverage.
 
-Observable (iteration 1): x = [m_HH_reco, cos_theta*], where m_HH_reco is the gen
-m_HH smeared by a 10% Gaussian as a *documented detector-resolution proxy*. The
-reweighting acts on gen m_HH while inference sees the smeared reco m_HH, so this is
-a genuine (non-circular) inference problem. Iteration 2 replaces the proxy with the
-real reconstructed di-Higgs mass + the event-level ParT score (GPU, via qsub).
+Observable (iteration 1): x = [m_HH_reco, cos_theta*], m_HH_reco = gen m_HH smeared by
+a 10% Gaussian (documented detector-resolution proxy; reweighting acts on gen m_HH while
+inference sees reco m_HH, so it is a genuine inference problem). Iteration 2 replaces the
+proxy with the real reconstructed di-Higgs mass + the event-level ParT score (GPU/qsub).
 
-Gate (see autoresearch plan):
-  (1) kl_true inside the recovered 68% interval for >= 3/4 injected points;
-  (2) 68%-interval coverage in [0.60, 0.76] over the coverage trials.
+Two upgrades over the first closure run (I3):
+  * WEIGHTED CARL training (all events, weights w_i(kl)) instead of low-N_eff resampling
+    -> removes the MLE bias from diversity collapse.
+  * SBC-CALIBRATED interval threshold delta* (set so 68% of calibration trials cover truth)
+    instead of the asymptotic Delta(lnL)=0.5, which is invalid for a learned ratio.
+
+Train/test split: the estimator trains on a disjoint set of SM events from the ones used
+to draw pseudo-data, so the closure is not self-referential.
+
+Gate: (1) kl_true inside the calibrated 68% interval for >= 3/4 injected points;
+      (2) held-out coverage at delta* in [0.60, 0.76].
 """
 from __future__ import annotations
 
@@ -28,12 +35,12 @@ import uproot
 
 sys.path.insert(0, ".")
 from sbi.kl_reweight import gen_higgs_kinematics, me2_coeffs_heft, KL_SM
-from sbi.snre import (BoxUniform, RatioEstimator, SNRETrainer,
-                      event_level_loglik_scan, extract_confidence_interval)
+from sbi.snre import (BoxUniform, RatioEstimator, WeightedCARLTrainer,
+                      event_level_loglik_scan)
 
 GEN_BRANCHES = ["GenPart_pt", "GenPart_eta", "GenPart_phi", "GenPart_mass",
                 "GenPart_pdgId", "GenPart_statusFlags"]
-SMEAR = 0.10  # detector resolution proxy on m_HH (iteration-1)
+SMEAR = 0.10
 
 
 def load_sm(file_glob, max_files=None):
@@ -56,34 +63,36 @@ def load_sm(file_glob, max_files=None):
 
 def reweight(m_hh, kl):
     a, b, c = me2_coeffs_heft(m_hh)
-    num = a + b * kl + c * kl * kl
     den = a + b * KL_SM + c * KL_SM * KL_SM
-    w = num / np.maximum(den, 1e-12)
+    w = (a + b * kl + c * kl * kl) / np.maximum(den, 1e-12)
     return np.clip(w, 0.0, 1e3)
 
 
-def reco_observable(m_hh, cos_ts, rng):
-    """[m_HH_reco, cos_theta*] with a 10% Gaussian smear on m_HH."""
+def make_reco(m_hh, cos_ts, rng):
     m_reco = m_hh * (1.0 + SMEAR * rng.standard_normal(len(m_hh)))
     return np.column_stack([m_reco, cos_ts]).astype(np.float32)
 
 
-def resample_at_kl(m_hh, cos_ts, kl, n, rng):
-    """Importance-resample n SM events ~ w(kl), return their reco observable."""
-    w = reweight(m_hh, kl)
-    p = w / w.sum()
-    idx = rng.choice(len(m_hh), size=n, replace=True, p=p)
-    return reco_observable(m_hh[idx], cos_ts[idx], rng)
+def pseudo_data(x_pool, m_pool, kl, n, rng):
+    w = reweight(m_pool, kl)
+    idx = rng.choice(len(x_pool), size=n, replace=True, p=w / w.sum())
+    return x_pool[idx]
 
 
-def build_training_set(m_hh, cos_ts, prior, n_kl, n_per_kl, rng):
-    thetas, xs = [], []
-    for _ in range(n_kl):
-        kl = float(prior.sample(1)[0, 0])
-        x = resample_at_kl(m_hh, cos_ts, kl, n_per_kl, rng)
-        thetas.append(np.full((n_per_kl, 1), kl, np.float32))
-        xs.append(x)
-    return np.concatenate(thetas), np.concatenate(xs)
+def s_at_truth(model, x_obs, kl_grid, kl_true, device):
+    """-loglik at the truth (0 if truth is the MLE). Truth is inside the interval
+    at threshold delta iff this value <= delta."""
+    ll = event_level_loglik_scan(model, x_obs, kl_grid, device)
+    j = int(np.argmin(np.abs(kl_grid - kl_true)))
+    return -ll[j], ll
+
+
+def interval_at(kl_grid, ll, delta):
+    above = kl_grid[ll > -delta]
+    mle = float(kl_grid[int(np.argmax(ll))])
+    if len(above):
+        return mle, float(above[0]), float(above[-1])
+    return mle, float(kl_grid[0]), float(kl_grid[-1])
 
 
 def main():
@@ -92,11 +101,11 @@ def main():
     ap.add_argument("--max-files", type=int, default=None)
     ap.add_argument("--kl-low", type=float, default=-1.0)
     ap.add_argument("--kl-high", type=float, default=6.0)
-    ap.add_argument("--n-kl", type=int, default=400)
-    ap.add_argument("--n-per-kl", type=int, default=400)
-    ap.add_argument("--epochs", type=int, default=150)
-    ap.add_argument("--n-obs", type=int, default=2000, help="events per pseudo-dataset")
-    ap.add_argument("--n-cov", type=int, default=200, help="coverage trials")
+    ap.add_argument("--n-steps", type=int, default=6000)
+    ap.add_argument("--batch", type=int, default=2048)
+    ap.add_argument("--n-obs", type=int, default=2000)
+    ap.add_argument("--n-cal", type=int, default=300)
+    ap.add_argument("--n-cov", type=int, default=300)
     ap.add_argument("--outdir", default="autoresearch/nsbi-260630-1733")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -107,64 +116,76 @@ def main():
     print(f"[closure] device={device}", flush=True)
 
     m_hh, cos_ts = load_sm(args.files, args.max_files)
-    print(f"[closure] SM events: {len(m_hh)}", flush=True)
+    x_all = make_reco(m_hh, cos_ts, rng)
+    n = len(m_hh)
+    print(f"[closure] SM events: {n}", flush=True)
+
+    # disjoint train (estimator) / test (pseudo-data) split
+    perm = rng.permutation(n)
+    tr, te = perm[: int(0.6 * n)], perm[int(0.6 * n):]
+    mu, sd = x_all[tr].mean(0), x_all[tr].std(0)
+    sd[sd < 1e-8] = 1.0
+    std = lambda x: (x - mu) / sd
+    x_tr_s, x_te_s = std(x_all[tr]), std(x_all[te])
+    m_tr, m_te = m_hh[tr], m_hh[te]
 
     prior = BoxUniform([args.kl_low], [args.kl_high])
 
-    # standardize observables on an SM (kl=1) reference draw
-    x_ref = reco_observable(m_hh, cos_ts, rng)
-    mu, sd = x_ref.mean(0), x_ref.std(0)
-    sd[sd < 1e-8] = 1.0
-    std = lambda x: (x - mu) / sd
+    print("[closure] training weighted CARL ratio estimator...", flush=True)
+    est = RatioEstimator(x_dim=x_tr_s.shape[1], theta_dim=1)
+    trainer = WeightedCARLTrainer(prior, reweight, est, device=device, lr=1e-3)
+    model = trainer.train(x_tr_s, m_tr, n_steps=args.n_steps, batch=args.batch)
 
-    print("[closure] building parameterized training set...", flush=True)
-    theta_tr, x_tr = build_training_set(m_hh, cos_ts, prior, args.n_kl,
-                                        args.n_per_kl, rng)
-    x_tr = std(x_tr)
+    kl_grid = np.linspace(args.kl_low, args.kl_high, 181)
 
-    print("[closure] training SNRE-B ratio estimator...", flush=True)
-    est = RatioEstimator(x_dim=x_tr.shape[1], theta_dim=1)
-    tr = SNRETrainer(prior, estimator=est, device=device, lr=1e-3)
-    tr.append_simulations(theta_tr, x_tr)
-    model = tr.train(n_epochs=args.epochs, batch_size=512, patience=25)
+    # ---- calibrate the interval threshold delta* for 68% coverage ----
+    print("[closure] calibrating interval threshold (SBC)...", flush=True)
+    s_cal = []
+    for _ in range(args.n_cal):
+        kl_true = float(prior.sample(1)[0, 0])
+        x_obs = std(pseudo_data(x_all[te], m_te, kl_true, args.n_obs, rng))
+        s, _ = s_at_truth(model, x_obs, kl_grid, kl_true, device)
+        s_cal.append(s)
+    delta_star = float(np.quantile(s_cal, 0.68))
+    print(f"[closure] delta* (68%) = {delta_star:.3f} "
+          f"(asymptotic would be 0.5)", flush=True)
 
-    kl_grid = np.linspace(args.kl_low, args.kl_high, 241)
+    # ---- held-out coverage at delta* ----
+    print("[closure] measuring held-out coverage...", flush=True)
+    hits = 0
+    for _ in range(args.n_cov):
+        kl_true = float(prior.sample(1)[0, 0])
+        x_obs = std(pseudo_data(x_all[te], m_te, kl_true, args.n_obs, rng))
+        s, _ = s_at_truth(model, x_obs, kl_grid, kl_true, device)
+        hits += (s <= delta_star)
+    coverage = hits / args.n_cov
 
-    # ---- recovery on injected points ----
+    # ---- recovery on injected points (calibrated interval) ----
     inject = [0.0, 1.0, 2.45, 5.0]
-    recov = {}
-    n_in = 0
+    recov, n_in = {}, 0
     for kl_true in inject:
-        x_obs = std(resample_at_kl(m_hh, cos_ts, kl_true, args.n_obs, rng))
-        ll = event_level_loglik_scan(model, x_obs, kl_grid, device)
-        mle, lo, hi = extract_confidence_interval(kl_grid, ll, delta=0.5)
+        x_obs = std(pseudo_data(x_all[te], m_te, kl_true, args.n_obs, rng))
+        _, ll = s_at_truth(model, x_obs, kl_grid, kl_true, device)
+        mle, lo, hi = interval_at(kl_grid, ll, delta_star)
         inside = bool(lo <= kl_true <= hi)
         n_in += inside
-        recov[str(kl_true)] = dict(mle=float(mle), lo=lo, hi=hi, inside=inside)
+        recov[str(kl_true)] = dict(mle=mle, lo=lo, hi=hi, inside=inside)
         print(f"[closure] kl_true={kl_true:5.2f} -> MLE={mle:5.2f} "
               f"68%=[{lo:5.2f},{hi:5.2f}] inside={inside}", flush=True)
 
-    # ---- coverage (SBC-style) over prior draws ----
-    cov_hits = 0
-    for _ in range(args.n_cov):
-        kl_true = float(prior.sample(1)[0, 0])
-        x_obs = std(resample_at_kl(m_hh, cos_ts, kl_true, args.n_obs, rng))
-        ll = event_level_loglik_scan(model, x_obs, kl_grid, device)
-        _, lo, hi = extract_confidence_interval(kl_grid, ll, delta=0.5)
-        cov_hits += (lo <= kl_true <= hi)
-    coverage = cov_hits / args.n_cov
-
     gate1 = n_in >= 3
     gate2 = 0.60 <= coverage <= 0.76
-    result = dict(n_sm=int(len(m_hh)), recovery=recov, n_inside=int(n_in),
+    result = dict(method="weighted_carl+sbc_calibrated", n_sm=int(n),
+                  delta_star=delta_star, recovery=recov, n_inside=int(n_in),
                   coverage=float(coverage), gate_recovery=bool(gate1),
                   gate_coverage=bool(gate2), gate_pass=bool(gate1 and gate2),
                   config=vars(args))
     os.makedirs(args.outdir, exist_ok=True)
     with open(os.path.join(args.outdir, "closure_result.json"), "w") as fh:
         json.dump(result, fh, indent=2)
-    print(f"\n[closure] recovery {n_in}/4 inside 68%  (gate>=3: {gate1})", flush=True)
-    print(f"[closure] coverage = {coverage:.3f}  (gate [0.60,0.76]: {gate2})", flush=True)
+    print(f"\n[closure] recovery {n_in}/4 inside 68% (gate>=3: {gate1})", flush=True)
+    print(f"[closure] coverage={coverage:.3f} at delta*={delta_star:.3f} "
+          f"(gate [0.60,0.76]: {gate2})", flush=True)
     print(f"[closure] GATE PASS = {gate1 and gate2}", flush=True)
     return 0 if (gate1 and gate2) else 2
 

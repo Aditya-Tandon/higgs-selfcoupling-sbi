@@ -163,6 +163,92 @@ class SNRETrainer:
         return tot / 3
 
 
+class WeightedCARLTrainer:
+    """Parameterized CARL ratio estimator trained with importance *weights*.
+
+    For each theta drawn from the prior, the per-event likelihood ratio to the SM
+    reference is learned by a weighted binary classifier:
+        class 1 = p(x|theta)   represented by SM events weighted by w_i(theta)
+        class 0 = p(x|theta_ref=SM) represented by the same SM events, weight 1
+    so the logit -> log[p(x|theta)/p(x|SM)] (shape ratio; per-batch mean-normalised
+    weights drop the theta-dependent rate, which is handled separately by the
+    cross-section term). Unlike importance *resampling*, every theta sees all events
+    -> no low-N_eff diversity collapse, which removes the I3 MLE bias.
+    """
+
+    def __init__(self, prior, reweight_fn, estimator, device="cpu", lr=1e-3):
+        self.prior = prior
+        self.reweight_fn = reweight_fn  # (m_hh[idx], theta) -> weights
+        self.estimator = estimator.to(device)
+        self.device = device
+        self.lr = lr
+
+    def train(self, x, m_hh, n_steps=4000, batch=2048, val_frac=0.1, patience=400,
+              verbose=True):
+        x = torch.as_tensor(np.asarray(x, np.float32), device=self.device)
+        m_hh = np.asarray(m_hh, np.float64)
+        n = len(x)
+        n_val = max(1, int(n * val_frac))
+        perm = np.random.permutation(n)
+        tr_idx, va_idx = perm[n_val:], perm[:n_val]
+        opt = torch.optim.Adam(self.estimator.parameters(), lr=self.lr,
+                               weight_decay=1e-5)
+        sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=n_steps,
+                                                         eta_min=self.lr * 0.01)
+        bce = nn.BCEWithLogitsLoss(reduction="none")
+        best, best_state, bad = float("inf"), None, 0
+
+        def batch_loss(idx_pool, theta):
+            idx = np.random.choice(idx_pool, size=min(batch, len(idx_pool)),
+                                   replace=False)
+            xb = x[idx]
+            w = self.reweight_fn(m_hh[idx], theta)
+            w = w / max(w.mean(), 1e-12)  # mean-normalise -> shape ratio
+            wt = torch.as_tensor(w, dtype=torch.float32, device=self.device)
+            th = torch.full((len(idx), 1), float(theta), device=self.device)
+            # reweighting trick: each event is a class-1 example (weight w_i, from
+            # p(x|theta)) and a class-0 example (weight 1, from p(x|SM)) at once.
+            logit = self.estimator(xb, th)
+            l1 = (bce(logit, torch.ones_like(logit)) * wt).mean()
+            l0 = bce(logit, torch.zeros_like(logit)).mean()
+            return l1 + l0
+
+        for step in range(n_steps):
+            self.estimator.train()
+            theta = float(self.prior.sample(1)[0, 0])
+            loss = batch_loss(tr_idx, theta)
+            opt.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.estimator.parameters(), 5.0)
+            opt.step()
+            sch.step()
+            if step % 100 == 0 or step == n_steps - 1:
+                self.estimator.eval()
+                with torch.no_grad():
+                    vl = float(np.mean([batch_loss(va_idx,
+                               float(self.prior.sample(1)[0, 0])).item()
+                               for _ in range(5)]))
+                if verbose and (step % 500 == 0 or step == n_steps - 1):
+                    print(f"  step {step:5d}/{n_steps} val={vl:.4f} "
+                          f"lr={sch.get_last_lr()[0]:.2e}", flush=True)
+                if vl < best - 1e-4:
+                    best, bad = vl, 0
+                    best_state = {k: v.clone()
+                                  for k, v in self.estimator.state_dict().items()}
+                else:
+                    bad += 100
+                    if bad >= patience:
+                        if verbose:
+                            print(f"  early stop @ step {step}", flush=True)
+                        break
+        if best_state is not None:
+            self.estimator.load_state_dict(best_state)
+        self.estimator.eval()
+        if verbose:
+            print(f"  best val loss: {best:.4f}", flush=True)
+        return self.estimator
+
+
 def event_level_loglik_scan(model, x_events, kl_grid, device="cpu"):
     """log L(kl) = sum_i f(x_i, kl) over a grid of kl, normalised to max 0."""
     model.eval()
