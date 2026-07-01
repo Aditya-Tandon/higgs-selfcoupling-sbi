@@ -80,3 +80,15 @@ Components needed:
   test share structure). Iteration-1 machinery VALIDATED end-to-end.
   NEXT (efficiency, not coverage): smaller delta* via better per-event ratio + distinct-event
   pseudo-data; then iteration-2 real observables (reco m_HH + event ParT score, S(kl)+B, GPU).
+
+## Iteration 2 (real observables) — BUILT + smoke-validated
+- sbi/build_nsbi_cache.py (+GPU .pbs): aligned cache (signal score+reco_mhh+gen_mhh+cos*, QCD score+reco_mhh+sigma).
+  Smoke OK: classifier discriminates (sig score med 0.47 vs QCD 0.05); reco!=gen (genuine reco); alignment assert passes.
+  Full cache job 3155327 (v1_gpu72) running: 50k signal + 9x40k QCD.
+- sbi/closure_kl_v2.py: BINNED extended likelihood on x=[event ParT score, reco m_HH].
+  Discrete-event unbinned closure INFEASIBLE (B~1e11 at L1 scouting -> OOM); binned draws Poisson
+  per-BIN (any B). nu_b(kl)=S(kl) f_sig,b(kl) + B f_bkg,b, signal template morphed by kl reweighting.
+  I5 SMOKE GATE PASS (moderate-yield regime, boost 1e7, yield-scale 1e-5): recovery 4/4 (|bias|<0.02),
+  coverage 0.645 in [0.60,0.76], delta*=0.40 (~asymptotic 0.5 -> binned likelihood WELL-CALIBRATED,
+  vs 203 for unbinned ratio). Real-cache run pending; realistic S/B~1e-9 -> honest sensitivity likely weak
+  (matches thesis significance ~0.01) => needs tighter selection / better discriminant.
