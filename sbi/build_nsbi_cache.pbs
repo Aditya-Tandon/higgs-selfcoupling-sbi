@@ -1,8 +1,9 @@
 #!/bin/bash
 #PBS -N nsbi_cache
 #PBS -q v1_gpu72
-#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
-#PBS -l walltime=08:00:00
+# Right-sized from actuals: full cache (50k sig + 9x40k QCD) ran ~21 min, ~4 GB peak.
+#PBS -l select=1:ncpus=8:mem=16gb:ngpus=1
+#PBS -l walltime=01:00:00
 #PBS -o logs/nsbi_cache.out
 #PBS -e logs/nsbi_cache.err
 

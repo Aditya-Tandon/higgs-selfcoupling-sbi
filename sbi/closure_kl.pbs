@@ -1,8 +1,9 @@
 #!/bin/bash
 #PBS -N nsbi_closure
 #PBS -q v1_medium24
-#PBS -l select=1:ncpus=8:mem=32gb
-#PBS -l walltime=04:00:00
+# Right-sized from actuals: this closure ran ~4 min, <1 GB peak on 8 cpus.
+#PBS -l select=1:ncpus=8:mem=4gb
+#PBS -l walltime=00:30:00
 #PBS -o logs/nsbi_closure.out
 #PBS -e logs/nsbi_closure.err
 
