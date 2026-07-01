@@ -1,0 +1,62 @@
+{
+  "method": "iter2_binned_extended_likelihood",
+  "score_wp": 0.9,
+  "signal_boost": 600000.0,
+  "S_SM": 7590.888000000001,
+  "B": 8090.684068321731,
+  "S_over_B": 0.9382257341775794,
+  "delta_star": 0.4500770266348266,
+  "coverage": 0.7133333333333334,
+  "recovery": {
+    "0.0": {
+      "mle": -0.008333333333333304,
+      "bias": -0.008333333333333304,
+      "lo": -0.008333333333333304,
+      "hi": -0.008333333333333304,
+      "width": 0.0,
+      "ok": true
+    },
+    "1.0": {
+      "mle": 1.0125000000000002,
+      "bias": 0.012500000000000178,
+      "lo": 0.9833333333333334,
+      "hi": 1.0125000000000002,
+      "width": 0.029166666666666785,
+      "ok": true
+    },
+    "2.45": {
+      "mle": 2.441666666666667,
+      "bias": -0.008333333333333304,
+      "lo": 2.441666666666667,
+      "hi": 2.470833333333333,
+      "width": 0.02916666666666634,
+      "ok": true
+    },
+    "5.0": {
+      "mle": 5.008333333333334,
+      "bias": 0.008333333333333748,
+      "lo": 5.008333333333334,
+      "hi": 5.008333333333334,
+      "width": 0.0,
+      "ok": true
+    }
+  },
+  "n_inside": 4,
+  "gate_recovery": true,
+  "gate_coverage": true,
+  "gate_pass": true,
+  "config": {
+    "cache": "data/event_level/nsbi_cache.npz",
+    "config": "hh-bbbb-obj-config.json",
+    "kl_low": -1.0,
+    "kl_high": 6.0,
+    "score_wp": 0.9,
+    "nbins_score": 6,
+    "nbins_mhh": 6,
+    "signal_boost": 600000.0,
+    "yield_scale": 1e-05,
+    "n_cov": 300,
+    "outdir": "/rds/general/user/at3722/home/.claude/jobs/43ddd269/tmp/v2_real_valid",
+    "seed": 0
+  }
+}

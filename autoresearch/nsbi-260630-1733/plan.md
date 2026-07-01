@@ -92,3 +92,13 @@ Components needed:
   coverage 0.645 in [0.60,0.76], delta*=0.40 (~asymptotic 0.5 -> binned likelihood WELL-CALIBRATED,
   vs 203 for unbinned ratio). Real-cache run pending; realistic S/B~1e-9 -> honest sensitivity likely weak
   (matches thesis significance ~0.01) => needs tighter selection / better discriminant.
+
+- I6 (iter-2 real cache, binned extended likelihood): full cache built (50k sig/28728 reco;
+  360k QCD/71079 reco; sig score med 0.52 vs QCD 0.05). Two regimes at WP score>=0.9:
+  * HONEST full-lumi: S_SM=1270, B=8.09e8, S/B=1.6e-6 -> NO kl sensitivity (68% interval = full
+    prior [-1,6]); MLE unbiased, coverage 0.620. Matches thesis significance ~0.01.
+  * METHOD-VALIDATION (boost 6e5, yield-scale 1e-5 -> S/B~0.94): recovery 4/4 |bias|<0.02,
+    coverage 0.713, delta*=0.45 (~asymptotic 0.5 => binned likelihood WELL-CALIBRATED).
+  CONCLUSION: NSBI machinery validated on real observables (unbiased + calibrated); physics
+  sensitivity at L1 scouting is negligible with current event classifier + selection. Next
+  physics lever: stronger discrimination (tighter WP + mass window / kl-aware net), not method.
