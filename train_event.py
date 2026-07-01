@@ -184,6 +184,18 @@ def run_training(cfg):
         if is_main(rank):
             print("Loaded model & optimiser from W&B artifact")
 
+    # Fine-tune init: load model weights ONLY from a local checkpoint (fresh optimiser +
+    # scheduler), for adapting a pretrained classifier to a new (e.g. preselected) phase space.
+    init_ckpt = cfg["training"].get("init_ckpt")
+    if init_ckpt and not restart:
+        ck = torch.load(init_ckpt, map_location=device, weights_only=False)
+        state = ck["model_state_dict"] if isinstance(ck, dict) and "model_state_dict" in ck else ck
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        model.to(device)
+        if is_main(rank):
+            print(f"Fine-tune init from {init_ckpt} "
+                  f"(missing={len(missing)}, unexpected={len(unexpected)})")
+
     # DDP wrapping (after checkpoint load so state_dict keys match)
     if distributed:
         dist_cfg = cfg.get("training", {}).get("distributed", {})
