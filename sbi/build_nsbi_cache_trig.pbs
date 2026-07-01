@@ -1,0 +1,16 @@
+#!/bin/bash
+#PBS -N nsbi_cache_trig
+#PBS -q v1_gpu72
+#PBS -l select=1:ncpus=8:mem=16gb:ngpus=1
+#PBS -l walltime=01:00:00
+#PBS -o logs/nsbi_cache_trig.out
+#PBS -e logs/nsbi_cache_trig.err
+# H1 test: build the cache WITH the HH->4b analysis preselection (trigger emulation)
+# to remove low-pt QCD. Right-sized from the skip-trigger build (~21 min, ~4 GB).
+cd "$PBS_O_WORKDIR"
+mkdir -p logs data/event_level
+source ~/miniforge3/etc/profile.d/conda.sh 2>/dev/null || source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate hep-root-ml
+export OMP_NUM_THREADS=8
+python sbi/build_nsbi_cache.py --apply-trigger --qcd-max-per-bin 40000 \
+    --out data/event_level/nsbi_cache_trig.npz

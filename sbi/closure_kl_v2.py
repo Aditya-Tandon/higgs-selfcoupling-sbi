@@ -71,21 +71,28 @@ def main():
     d = np.load(args.cache, allow_pickle=True)
     cfg = json.load(open(args.config))
 
+    L_fb = cfg["physics"]["luminosity_fb"]
+    # F1 fix: per-event QCD yield = sigma * 1000 * L / n_loaded_this_bin, computed on the FULL
+    # loaded array (before any selection) so the WP/reco selection efficiency is preserved, not
+    # divided out. Only a fraction of n_gen is loaded and that fraction varies per bin.
+    qsig_full = d["qcd_sigma"].astype(np.float64)
+    q_yield_full = np.empty_like(qsig_full)
+    for s in np.unique(qsig_full):
+        mfull = qsig_full == s
+        q_yield_full[mfull] = s * 1000.0 * L_fb / mfull.sum()
+
     def sel(p):
         return np.isfinite(d[f"{p}_reco_mhh"]) & (d[f"{p}_score"] >= args.score_wp)
     ms, mq = sel("sig"), sel("qcd")
     ss, sm = d["sig_score"][ms], d["sig_reco_mhh"][ms]
     gen = d["sig_gen_mhh"][ms].astype(np.float64)
     qs, qm = d["qcd_score"][mq], d["qcd_reco_mhh"][mq]
-    qsigma = d["qcd_sigma"][mq].astype(np.float64)
     print(f"[v2] after WP {args.score_wp}: signal {ms.sum()}, QCD {mq.sum()}", flush=True)
 
-    # yields at target luminosity
-    L_fb = cfg["physics"]["luminosity_fb"]
+    # yields at target luminosity (signal: all n_gen loaded, so efficiency = n_sel/n_gen)
     sig_w = cfg["physics"]["signal_xsec_pb"] * 1000.0 * L_fb / cfg["physics"]["n_gen_signal"]
     S_SM = float(ms.sum()) * sig_w * args.signal_boost * args.yield_scale
-    s2n = {np.float32(v["weight"]): int(v["n_gen"]) for v in cfg["QCD_background"].values()}
-    q_yield = np.array([s * 1000.0 * L_fb / s2n[np.float32(s)] for s in qsigma]) * args.yield_scale
+    q_yield = q_yield_full[mq] * args.yield_scale
     B = float(q_yield.sum())
     print(f"[v2] yields: S_SM={S_SM:.3g} B={B:.3g} S/B={S_SM/max(B,1e-30):.2e} "
           f"(boost={args.signal_boost})", flush=True)
