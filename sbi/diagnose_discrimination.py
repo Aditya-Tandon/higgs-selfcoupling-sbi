@@ -8,6 +8,7 @@ background discrimination the bottleneck for kappa_lambda sensitivity, and what 
 QCD yields use sigma_bin * 1000 * L / n_loaded_this_bin (F1 fix: the loaded subset represents
 the full bin cross-section), so B and the background shape are correct.
 """
+import argparse
 import json
 import sys
 import numpy as np
@@ -17,16 +18,20 @@ sys.path.insert(0, ".")
 L_FB = 1000.0
 
 
-def load(cache="data/event_level/nsbi_cache.npz", cfg="hh-bbbb-obj-config.json"):
+def load(cache="data/event_level/nsbi_cache.npz", cfg="hh-bbbb-obj-config.json", n_loaded=None):
+    """n_loaded: per-bin loaded count. If None, inferred from the cache (correct only when the
+    cache stores ALL loaded QCD events, i.e. no preselection). For a preselected cache that stores
+    only survivors, pass --n-loaded = the original --qcd-max-per-bin so the selection efficiency
+    is preserved (yield = sigma*1000*L/n_loaded, NOT /n_survived)."""
     d = np.load(cache, allow_pickle=True)
     c = json.load(open(cfg))
     sig_w = c["physics"]["signal_xsec_pb"] * 1000.0 * L_FB / c["physics"]["n_gen_signal"]
-    # per-event QCD yield with F1 fix: sigma * 1000 * L / n_loaded_this_bin
     qsig = d["qcd_sigma"].astype(np.float64)
     qyield = np.empty_like(qsig)
     for s in np.unique(qsig):
         m = qsig == s
-        qyield[m] = s * 1000.0 * L_FB / m.sum()
+        denom = float(m.sum()) if n_loaded is None else float(n_loaded)
+        qyield[m] = s * 1000.0 * L_FB / denom
     return d, sig_w, qyield, c
 
 
@@ -42,7 +47,12 @@ def sig_bkg_at(thr, ss, sw, qs, qy, s_extra=None, q_extra=None):
 
 
 def main():
-    d, sig_w, qyield, cfg = load()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--cache", default="data/event_level/nsbi_cache.npz")
+    ap.add_argument("--n-loaded", type=float, default=None,
+                    help="per-bin loaded count (pass qcd-max-per-bin for a preselected cache)")
+    args = ap.parse_args()
+    d, sig_w, qyield, cfg = load(cache=args.cache, n_loaded=args.n_loaded)
     ss, sm_reco = d["sig_score"], np.isfinite(d["sig_reco_mhh"])
     qs, qm_reco = d["qcd_score"], np.isfinite(d["qcd_reco_mhh"])
     s_mhh, q_mhh = d["sig_reco_mhh"], d["qcd_reco_mhh"]

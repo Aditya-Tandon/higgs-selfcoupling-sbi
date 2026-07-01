@@ -22,3 +22,26 @@ confirmed = discrimination + background composition, NOT the NSBI inference (whi
 
 ## Gate: S/sqrt(B) in the di-Higgs mass region at fixed luminosity (higher is better),
 with B MC-stat uncertainty tracked (>= N_eff events).
+
+## RESULTS
+### H1 (apply preselection / trigger emulation) — CONFIRMED, 8x win
+Rebuilt cache with --apply-trigger (>=4 L1Ext jets pt-threshold + HT>330 + b-tag WP).
+- Low-pt QCD ELIMINATED: pt_20_30 0/40000, pt_30_50 0/40000, pt_50_80 2, pt_80_120 6.
+- Signal 3448/50000 (6.9%) pass; QCD 618 total survive (from 9x40000 loaded).
+- Best S/sqrt(B) 0.0058 -> **0.0477 (8x)** @ score>=0.9. B cut from 5.7e14 to 2.1e9.
+- IMPLICATION: the iteration-2 "no sensitivity" (S/B=1.6e-6) was largely an ARTIFACT of the
+  MISSING preselection (skip_trigger). With preselection B is ~1000x smaller.
+- Mass window no longer helps (B now MC-stat-limited: ~5-28 QCD events) -> mass was a proxy
+  for "remove low-pt QCD", which the trigger does directly.
+
+### Classifier headroom on the HARD (preselected) phase space
+AUC on preselected events: **0.855 unweighted / 0.780 xsec-weighted**, vs 0.918 on full phase
+space. The headline AUC is inflated by easy low-pt QCD that preselection removes. On the
+relevant background the current model is much weaker -> RETRAIN on preselected phase space
+with balanced class weighting (H3).
+
+### Remaining limiter: QCD MC statistics (H4)
+Post-preselection B from ~28 MC events; low-pt bins have 0/40000 survivors but sigma so large
+that even 1/40000 leakage ~ observed B. Need more low-pt QCD MC to bound trigger leakage.
+
+## Next: H3 retrain (preselected + balanced weighting), then H4 (more low-pt QCD MC).
