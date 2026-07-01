@@ -45,3 +45,29 @@ Post-preselection B from ~28 MC events; low-pt bins have 0/40000 survivors but s
 that even 1/40000 leakage ~ observed B. Need more low-pt QCD MC to bound trigger leakage.
 
 ## Next: H3 retrain (preselected + balanced weighting), then H4 (more low-pt QCD MC).
+
+### H3 (retrain/fine-tune on preselected phase space) — NEGATIVE (informative)
+Built preselected dataset (make_event_dataset --skip_trigger false): 4987 events (3448 sig,
+1539 QCD). Fine-tuned event ParT from best_event_model_61z973dk.pth, balanced pos_weight=0.446,
+lr 5e-5, 60 epochs (job 3158707 -> best_event_model_dk94ojs5.pth).
+Fair head-to-head on the SAME held-out val split (seed 42, 998 events):
+- OLD (full-trained):        AUC unweighted 0.850, xsec-weighted 0.840
+- NEW (preselected fine-tune):AUC unweighted 0.845, xsec-weighted 0.840
+=> NO improvement. The pretrained model already saturates discrimination on the preselected
+phase space; 4987 events can't improve an 8-layer ParT trained on 1.9M. CONCLUSION:
+discrimination is INPUT-limited (L1 PUPPI observables, ~0.84 AUC ceiling), not training-limited.
+Further gains need better inputs (PF/tracking dxy,z0 -- thesis PF>PUPPI by ~0.15 AUC) or a
+different discriminant, not retraining.
+
+### Corrected honest kappa_lambda sensitivity (preselected cache, F1+n_loaded fixed)
+closure_kl_v2 on nsbi_cache_trig.npz (--qcd-n-loaded 40000, WP 0.5, 4x4 bins):
+S_SM=733, B=9.7e8, S/B=7.6e-7. Recovery 4/4 unbiased, coverage 0.690, delta*=0.121
+(well-calibrated) BUT 68% interval = full prior [-1,6] (width 7) -> STILL NO kl sensitivity.
+The 8x S/sqrt(B) gain from preselection is real but S/sqrt(B)~0.05 << 1.
+
+## VERDICT
+- H1 (preselection): the real, large lever (8x); corrects the iter-2 "no sensitivity" artifact.
+- H3 (retrain): negative -> discrimination is input-limited, not training-limited.
+- kappa_lambda sensitivity at L1 scouting stays negligible even after H1. Next physics levers
+  (for the USER to weigh): PF/tracking inputs if available in scouting; more low-pt QCD MC (H4)
+  to trust B; or accept that L1-scouting HH4b is a discrimination-ceiling problem for kl.

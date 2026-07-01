@@ -51,6 +51,9 @@ def hist2d(x0, x1, w, edges0, edges1):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache", default="data/event_level/nsbi_cache.npz")
+    ap.add_argument("--qcd-n-loaded", type=float, default=None,
+                    help="pre-selection loaded count per QCD bin; REQUIRED for a preselected "
+                         "cache that stores only survivors (else trigger efficiency is divided out)")
     ap.add_argument("--config", default="hh-bbbb-obj-config.json")
     ap.add_argument("--kl-low", type=float, default=-1.0)
     ap.add_argument("--kl-high", type=float, default=6.0)
@@ -79,7 +82,8 @@ def main():
     q_yield_full = np.empty_like(qsig_full)
     for s in np.unique(qsig_full):
         mfull = qsig_full == s
-        q_yield_full[mfull] = s * 1000.0 * L_fb / mfull.sum()
+        denom = float(mfull.sum()) if args.qcd_n_loaded is None else float(args.qcd_n_loaded)
+        q_yield_full[mfull] = s * 1000.0 * L_fb / denom
 
     def sel(p):
         return np.isfinite(d[f"{p}_reco_mhh"]) & (d[f"{p}_score"] >= args.score_wp)
