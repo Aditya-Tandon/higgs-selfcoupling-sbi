@@ -1,0 +1,28 @@
+#!/bin/bash
+#PBS -N nsbi_closure
+#PBS -q v1_medium24
+#PBS -l select=1:ncpus=8:mem=32gb
+#PBS -l walltime=04:00:00
+#PBS -o logs/nsbi_closure.out
+#PBS -e logs/nsbi_closure.err
+
+# kappa_lambda NSBI closure test (iteration 1) — CPU job.
+# The observable is 2-D (m_HH_reco, cos_theta*); a small MLP, so CPU is sufficient.
+
+cd "$PBS_O_WORKDIR"
+mkdir -p logs
+
+source ~/miniforge3/etc/profile.d/conda.sh 2>/dev/null \
+  || source ~/anaconda3/etc/profile.d/conda.sh 2>/dev/null \
+  || source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate hep-root-ml
+
+export OMP_NUM_THREADS=8
+export MKL_NUM_THREADS=8
+
+python sbi/closure_kl.py \
+    --files "data/hh4b/data_*.root" \
+    --kl-low -1.0 --kl-high 6.0 \
+    --n-steps 8000 --batch 4096 \
+    --n-obs 2000 --n-cal 400 --n-cov 400 \
+    --outdir autoresearch/nsbi-260630-1733
