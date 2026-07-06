@@ -196,6 +196,19 @@ def run_training(cfg):
             print(f"Fine-tune init from {init_ckpt} "
                   f"(missing={len(missing)}, unexpected={len(unexpected)})")
 
+    # Local resume: continue a run from a LOCAL checkpoint (model + optimiser + scheduler +
+    # epoch) without W&B, for picking up offline training cut off at a walltime limit. Unlike
+    # init_ckpt this preserves the optimiser state and LR schedule (no fresh warmup).
+    resume_ckpt = cfg["training"].get("resume_ckpt")
+    resume_state = None
+    if resume_ckpt and not restart:
+        resume_state = torch.load(resume_ckpt, map_location=device, weights_only=False)
+        model.load_state_dict(resume_state["model_state_dict"])
+        model.to(device)
+        optimiser.load_state_dict(resume_state["optimiser_state_dict"])
+        if is_main(rank):
+            print(f"Resuming from {resume_ckpt} at epoch {resume_state['epoch'] + 1}")
+
     # DDP wrapping (after checkpoint load so state_dict keys match)
     if distributed:
         dist_cfg = cfg.get("training", {}).get("distributed", {})
@@ -220,6 +233,8 @@ def run_training(cfg):
         red_fac=cfg["training"]["scheduler"]["red_fac"],
         last_epoch=cfg["training"]["last_epoch_in_prev_run"] if restart else -1,
     )
+    if resume_state is not None and "scheduler_state_dict" in resume_state:
+        scheduler.load_state_dict(resume_state["scheduler_state_dict"])
 
     # Loss
     pos_weight = torch.tensor(cfg["training"]["pos_weight"], device=device)
@@ -234,6 +249,8 @@ def run_training(cfg):
     # Training loop
     best_auc = 0.0
     start_epoch = cfg["training"]["last_epoch_in_prev_run"] if restart else 0
+    if resume_state is not None:
+        start_epoch = resume_state["epoch"] + 1
     num_epochs = start_epoch + cfg["training"]["epochs"]
 
     if is_main(rank):
