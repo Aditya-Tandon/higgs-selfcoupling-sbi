@@ -1,7 +1,7 @@
 {
-    "exp_name": "puppi_qreg_cls_5.0_qreg_loss",
+    "exp_name": "wd_1.0",
     "num_constituents": 16,
-    "input_dim": 17, 
+    "input_dim": 17,
     "model": {
         "embed_dim": 128,
         "num_heads": 8,
@@ -12,44 +12,47 @@
         "num_classes": 1,
         "pt_regression": true,
         "quantile_regression": true,
-        "quantiles": [0.16, 0.84]
+        "quantiles": [
+            0.16,
+            0.84
+        ]
     },
     "training": {
         "physics_config": "hh-bbbb-obj-config.json",
         "eval_weight_mode": "full_physics",
-        "batch_size": 512,
-        "epochs": 300,
-        "restart": false,
-        "wandb_run_path": "adityatandon29/L1-BTagging-ParT/602uk8mt",
+        "batch_size": 16000,
+        "epochs": 300000,
+        "restart": true,
+        "wandb_run_path": "adityatandon29/L1-BTag-GrokkingTest/05oy49ex",
         "wandb_dir": "wandb",
-        "last_epoch_in_prev_run": 0,
+        "last_epoch_in_prev_run": 250,
         "log_freq": 10,
         "pos_weight": 10.0,
         "pt_reg_loss_scale": 1.0,
         "qreg_loss_scale": 1.0,
         "data": {
-            "pf_data_path": "data/qcd_bkg_cls_reg/l1_pf_16_flat.npz",
+            "pf_data_path": "data/cls_reg_data/l1_pf_16.npz",
             "puppi_data_path": "data/qcd_bkg_cls_reg/l1_puppi_16_flat.npz",
-            "val_split": 0.3,
+            "val_split": 0.7,
             "match_mode": null,
-            "num_workers": 2,
+            "num_workers": 0,
             "use_dataset": "puppi"
         },
         "optimiser": {
-            "lr": 5e-4,
-            "weight_decay": 1e-3
+            "lr": 0.0005,
+            "weight_decay": 1.0
         },
         "scheduler": {
             "warmup_epochs": 5,
-            "total_epochs": 300,
-            "min_lr": 1e-6,
+            "total_epochs": 1000000.0,
+            "min_lr": 1e-06,
             "red_fac": 0.5
         }
     },
-    "wandb":{
+    "wandb": {
         "entity": "adityatandon29",
-        "project": "L1-BTagging-ParT",
-        "artifact_name": "best_model",
-        "ckpt_type": "v938"
+        "project": "L1-BTag-GrokkingTest",
+        "artifact_name": "periodic_model",
+        "ckpt_type": "v24"
     }
 }

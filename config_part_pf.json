@@ -1,5 +1,5 @@
 {
-    "exp_name": "puppi_qreg_cls_5.0_qreg_loss",
+    "exp_name": "pf_qcd_qreg_pos_weight_10.0_full_weight",
     "num_constituents": 16,
     "input_dim": 17, 
     "model": {
@@ -15,12 +15,15 @@
         "quantiles": [0.16, 0.84]
     },
     "training": {
-        "physics_config": "hh-bbbb-obj-config.json",
-        "eval_weight_mode": "full_physics",
-        "batch_size": 512,
+        "distributed": {
+            "enabled": true,
+            "backend": "nccl",
+            "find_unused_parameters": false
+        },
+        "batch_size": 15000,
         "epochs": 300,
         "restart": false,
-        "wandb_run_path": "adityatandon29/L1-BTagging-ParT/602uk8mt",
+        "wandb_run_path": "adityatandon29/L1-BTagging-ParT/bbmx4ul0",
         "wandb_dir": "wandb",
         "last_epoch_in_prev_run": 0,
         "log_freq": 10,
@@ -28,12 +31,12 @@
         "pt_reg_loss_scale": 1.0,
         "qreg_loss_scale": 1.0,
         "data": {
-            "pf_data_path": "data/qcd_bkg_cls_reg/l1_pf_16_flat.npz",
+            "pf_data_path": "data/qcd_bkg_cls_reg/l1_pf_16_flat_full_npy",
             "puppi_data_path": "data/qcd_bkg_cls_reg/l1_puppi_16_flat.npz",
             "val_split": 0.3,
             "match_mode": null,
-            "num_workers": 2,
-            "use_dataset": "puppi"
+            "num_workers": 8,
+            "use_dataset": "pf"
         },
         "optimiser": {
             "lr": 5e-4,
@@ -49,7 +52,7 @@
     "wandb":{
         "entity": "adityatandon29",
         "project": "L1-BTagging-ParT",
-        "artifact_name": "best_model",
-        "ckpt_type": "v938"
+        "artifact_name": "periodic_model",
+        "ckpt_type": "v1591"
     }
 }
