@@ -81,6 +81,13 @@ def run_training(cfg):
 
     # Data
     dataset = StratifiedJetDataset(cfg["training"]["data"]["data_path"])
+    # Feature ablation (Dir-2 Stage-2 H-PF-return control): zero the listed
+    # feature columns, e.g. [4, 5] = (dxy, z0), before any split.
+    zero_cols = cfg["training"]["data"].get("zero_feature_cols")
+    if zero_cols:
+        assert dataset.X is not None, "zero_feature_cols needs eager (npz) mode"
+        dataset.X[:, :, zero_cols] = 0.0
+        print(f"Feature ablation: zeroed columns {zero_cols}")
     train_ds, val_ds, train_indices, val_indices, train_labels = stratified_split(
         dataset, cfg["training"]["data"]["val_split"], num_classes=1
     )

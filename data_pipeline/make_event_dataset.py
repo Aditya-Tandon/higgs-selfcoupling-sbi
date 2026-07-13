@@ -71,9 +71,12 @@ def passes_trigger_emulation(
     Emulates CMS resolved-channel HH→4b HLT trigger using L1Ext jets.
 
     Requirements:
-      - ≥4 jets with pT above descending thresholds [75, 60, 45, 40] GeV
-      - Scalar HT (sum of all jet pT) > 330 GeV
-      - ≥3 jets with <btag_field> > btag_wp
+      - ≥len(pt_thresholds) jets with pT above the descending thresholds
+        (default [75, 60, 45, 40] GeV)
+      - Scalar HT (sum of all jet pT) > ht_threshold (skipped if <= 0)
+      - ≥n_btag_required jets with <btag_field> > btag_wp (skipped entirely
+        if btag_wp is None — the b-tag-free selections of the Dir-2 co-design
+        scan)
 
     Parameters
     ----------
@@ -100,8 +103,8 @@ def passes_trigger_emulation(
 
     n_jets = ak.num(jets_sorted)
 
-    # Require at least 4 jets
-    has_4_jets = n_jets >= 4
+    # Require at least as many jets as there are pT thresholds
+    has_n_jets = n_jets >= len(pt_thresholds)
 
     # Leading jet pT thresholds
     pt_cuts = np.ones(len(jet_events), dtype=bool)
@@ -112,15 +115,18 @@ def passes_trigger_emulation(
         )
         pt_cuts &= ak.to_numpy(jet_pt_i) > thr
 
-    # Scalar HT
-    ht = ak.to_numpy(ak.sum(jet_events.pt, axis=1))
-    ht_cut = ht > ht_threshold
+    mask = ak.to_numpy(has_n_jets) & pt_cuts
 
-    # B-tag count
-    n_btag = ak.to_numpy(ak.sum(jet_events[btag_field] > btag_wp, axis=1))
-    btag_cut = n_btag >= n_btag_required
+    # Scalar HT (skipped if ht_threshold <= 0)
+    if ht_threshold > 0:
+        ht = ak.to_numpy(ak.sum(jet_events.pt, axis=1))
+        mask &= ht > ht_threshold
 
-    mask = ak.to_numpy(has_4_jets) & pt_cuts & ht_cut & btag_cut
+    # B-tag count (skipped if btag_wp is None)
+    if btag_wp is not None:
+        n_btag = ak.to_numpy(ak.sum(jet_events[btag_field] > btag_wp, axis=1))
+        mask &= n_btag >= n_btag_required
+
     return mask
 
 
@@ -238,7 +244,13 @@ def generate_event_dataset(
     max_signal_events=None,
     max_qcd_events_per_bin=None,
     flatten_spectrum=True,
-    collection_key="l1extpuppi"
+    collection_key="l1extpuppi",
+    pt_scale=1.0,
+    ht_threshold=330.0,
+    njet=4,
+    btag="config",
+    val_out=None,
+    val_fold=5,
 ):
     """
     Full pipeline: load ROOT files → feature extraction
@@ -258,6 +270,17 @@ def generate_event_dataset(
         Cap on signal events to load.
     max_qcd_events_per_bin : int or None
         Cap on QCD events per pT bin.
+    pt_scale, ht_threshold, njet, btag :
+        Parameterized selection (Dir-2 co-design): leading-jet thresholds
+        [75,60,45,40][:njet] * pt_scale; HT cut (<=0 disables); btag is
+        "config" (WP from config), "none" (no b-tag requirement) or a float.
+        Defaults reproduce the original trigger emulation exactly.
+    val_out : str or None
+        If set, events whose PRE-selection raw index satisfies
+        idx % val_fold == 0 are written to this separate held-out npz instead
+        of output_npz. Assigning the split before the selection (and from the
+        raw load order, identical across PUPPI/PF streams) is the
+        train/val-hygiene control pre-registered in the Dir-2 plan.
     """
     with open(config_path, "r") as f:
         config = json.load(f)
@@ -266,13 +289,22 @@ def generate_event_dataset(
     l1ext_cfg = config["l1ext"]
     l1ext_collection = l1ext_cfg["collection_name"]  # "L1puppiExtJetSC4"
     l1ext_tagger = l1ext_cfg["tagger_name"]  # "btagScore"
-    l1ext_btag_wp = l1ext_cfg["b_tag_cut"]  # 0.37053
+    if btag == "config":
+        l1ext_btag_wp = l1ext_cfg["b_tag_cut"]
+    elif btag == "none":
+        l1ext_btag_wp = None
+    else:
+        l1ext_btag_wp = float(btag)
+    pt_thresholds = tuple(t * pt_scale for t in (75, 60, 45, 40)[:njet])
+    print(f"Selection: pt>{pt_thresholds}, HT>{ht_threshold}, "
+          f"btag_wp={l1ext_btag_wp}, val_out={val_out}")
 
     all_x = []
     all_mask = []
     all_y = []
     all_ht = []
     all_qcd_weights = []
+    all_val = []   # held-out flag, assigned pre-selection (see val_out)
 
     # ── Signal (HH→4b) ──────────────────────────────────────────────
     print("\n=== Loading HH→4b signal ===")
@@ -291,6 +323,8 @@ def generate_event_dataset(
     else:
         sig_mask = passes_trigger_emulation(
             sig_jets,
+            pt_thresholds=pt_thresholds,
+            ht_threshold=ht_threshold,
             btag_wp=l1ext_btag_wp,
             btag_field=l1ext_tagger,
         )
@@ -302,6 +336,7 @@ def generate_event_dataset(
     sig_puppi_pass = sig_puppi[sig_mask]
     sig_jets_pass = sig_jets[sig_mask]
     n_sig_pass = int(sig_mask.sum())
+    all_val.extend(((np.arange(n_sig) % val_fold) == 0)[sig_mask].tolist())
 
     print(f"Extracting features for {n_sig_pass} signal events...")
     for i in tqdm(range(n_sig_pass), desc="Signal features"):
@@ -343,6 +378,8 @@ def generate_event_dataset(
         else:
             qcd_mask = passes_trigger_emulation(
                 qcd_jets,
+                pt_thresholds=pt_thresholds,
+                ht_threshold=ht_threshold,
                 btag_wp=l1ext_btag_wp,
                 btag_field=l1ext_tagger,
             )
@@ -358,6 +395,7 @@ def generate_event_dataset(
         qcd_puppi_pass = qcd_puppi[qcd_mask]
         qcd_jets_pass = qcd_jets[qcd_mask]
         n_qcd_pass = int(qcd_mask.sum())
+        all_val.extend(((np.arange(n_qcd) % val_fold) == 0)[qcd_mask].tolist())
 
         # Per-event cross-section weight: xsec / n_gen
         # Use n_gen from config if available, else fall back to n_loaded
@@ -408,19 +446,29 @@ def generate_event_dataset(
     out_dir = os.path.dirname(output_npz)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
-    print(f"\nWriting compressed .npz to {output_npz}...")
 
-    np.savez_compressed(
-        output_npz,
-        x=X,
-        mask=mask_arr,
-        y=y,
-        weights=weights,
-        jet_pt=ht,  # HT stored as jet_pt for compatibility
-        jet_eta=np.zeros(N, dtype=np.float32),
-        gen_pt=np.zeros(N, dtype=np.float32),
-        qcd_weights=qcd_w,
-    )
+    def _write(path, sel):
+        np.savez_compressed(
+            path,
+            x=X[sel],
+            mask=mask_arr[sel],
+            y=y[sel],
+            weights=weights[sel],
+            jet_pt=ht[sel],  # HT stored as jet_pt for compatibility
+            jet_eta=np.zeros(int(sel.sum()), dtype=np.float32),
+            gen_pt=np.zeros(int(sel.sum()), dtype=np.float32),
+            qcd_weights=qcd_w[sel],
+        )
+        print(f"Wrote {path}: x={X[sel].shape} "
+              f"(sig {int(y[sel].sum())}, bkg {int((1 - y[sel]).sum())})")
+
+    if val_out:
+        val_flags = np.array(all_val, dtype=bool)
+        assert len(val_flags) == N, (len(val_flags), N)
+        _write(output_npz, ~val_flags)
+        _write(val_out, val_flags)
+    else:
+        _write(output_npz, np.ones(N, dtype=bool))
 
     print(f"Done. Dataset shape: x={X.shape}, y={y.shape}")
 
@@ -485,6 +533,16 @@ if __name__ == "__main__":
         default="l1extpuppi",
         help="Key for the particle collection to use"
     )
+    parser.add_argument("--pt_scale", type=float, default=1.0,
+                        help="Scale on the leading-jet pT thresholds")
+    parser.add_argument("--ht_threshold", type=float, default=330.0,
+                        help="HT cut in GeV (<=0 disables)")
+    parser.add_argument("--njet", type=int, default=4,
+                        help="Number of leading-jet pT thresholds (4 or 3)")
+    parser.add_argument("--btag", type=str, default="config",
+                        help="'config' (WP from config), 'none', or a float WP")
+    parser.add_argument("--val_out", type=str, default=None,
+                        help="Held-out npz path (split assigned pre-selection)")
     args = parser.parse_args()
 
     generate_event_dataset(
@@ -496,4 +554,9 @@ if __name__ == "__main__":
         max_qcd_events_per_bin=args.max_qcd_events_per_bin,
         flatten_spectrum=args.flatten_spectrum,
         collection_key=args.collection_key,
+        pt_scale=args.pt_scale,
+        ht_threshold=args.ht_threshold,
+        njet=args.njet,
+        btag=args.btag,
+        val_out=args.val_out,
     )

@@ -1,0 +1,58 @@
+{
+  "exp_name": "EventParT_codesign_S3_pf",
+  "input_dim": 17,
+  "model": {
+    "embed_dim": 128,
+    "num_pairwise_feat": 7,
+    "num_heads": 8,
+    "num_layers": 8,
+    "num_cls_layers": 3,
+    "num_reg_layers": 3,
+    "dropout": 0.3,
+    "num_classes": 1,
+    "use_batch_norm": true,
+    "pt_regression": false,
+    "quantile_regression": false,
+    "quantiles": [
+      0.16,
+      0.84
+    ]
+  },
+  "training": {
+    "distributed": {
+      "enabled": false,
+      "backend": "nccl",
+      "find_unused_parameters": false
+    },
+    "restart": false,
+    "wandb_run_path": null,
+    "epochs": 60,
+    "batch_size": 32,
+    "pos_weight": 3.8381,
+    "log_freq": 10,
+    "last_epoch_in_prev_run": 0,
+    "use_amp": true,
+    "data": {
+      "data_path": "data/event_level/codesign/S3_pf.npz",
+      "val_split": 0.2,
+      "num_workers": 1
+    },
+    "optimiser": {
+      "lr": 5e-05,
+      "weight_decay": 0.0001
+    },
+    "scheduler": {
+      "warmup_epochs": 2,
+      "total_epochs": 60,
+      "min_lr": 1e-06,
+      "red_fac": 0.5
+    },
+    "init_ckpt": "best_event_model_j01wrf4e.pth"
+  },
+  "wandb": {
+    "project": "EventParT-HH4b",
+    "entity": "adityatandon29",
+    "artifact_name": "best_model",
+    "ckpt_type": "v27"
+  }
+}
