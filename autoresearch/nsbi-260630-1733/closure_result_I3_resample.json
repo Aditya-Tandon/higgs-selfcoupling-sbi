@@ -1,0 +1,47 @@
+{
+  "n_sm": 50000,
+  "recovery": {
+    "0.0": {
+      "mle": 0.3416666666666668,
+      "lo": 0.3125,
+      "hi": 0.37083333333333335,
+      "inside": false
+    },
+    "1.0": {
+      "mle": 1.1583333333333332,
+      "lo": 1.1583333333333332,
+      "hi": 1.1875,
+      "inside": false
+    },
+    "2.45": {
+      "mle": 2.529166666666667,
+      "lo": 2.529166666666667,
+      "hi": 2.529166666666667,
+      "inside": false
+    },
+    "5.0": {
+      "mle": 5.329166666666667,
+      "lo": 5.241666666666667,
+      "hi": 5.416666666666667,
+      "inside": false
+    }
+  },
+  "n_inside": 0,
+  "coverage": 0.09666666666666666,
+  "gate_recovery": false,
+  "gate_coverage": false,
+  "gate_pass": false,
+  "config": {
+    "files": "data/hh4b/data_*.root",
+    "max_files": null,
+    "kl_low": -1.0,
+    "kl_high": 6.0,
+    "n_kl": 600,
+    "n_per_kl": 600,
+    "epochs": 200,
+    "n_obs": 2000,
+    "n_cov": 300,
+    "outdir": "autoresearch/nsbi-260630-1733",
+    "seed": 0
+  }
+}

@@ -110,6 +110,8 @@ if os.path.exists(font_path):
 else:
     print(f"Font file not found at: {font_path}")
 
+print("Clearing GPU cache.")
+torch.cuda.empty_cache()
 
 # ── Plotting defaults ──────────────────────────────────────────────
 plt.rcParams.update(
@@ -3013,1270 +3015,1270 @@ def main():
     )
     print(f"Saved resolution cache → {_cache_path}  (label='{_model_label}')")
 
-    # ── Cell 22: Di-Higgs mass reconstruction with trained ParT ──────
-    # Configuration
-    apply_pt_correction = True
-
-    dataset_used = (
-        config_part.get("training", {}).get("data", {}).get("use_dataset", "pf")
-    )
-    if dataset_used == "pf":
-        collection_key = "l1extpf"
-    elif dataset_used == "puppi":
-        collection_key = "l1extpuppi"
-    else:
-        collection_key = "l1barrelextpf"
-    print(f"Model was trained on: {dataset_used} → clustering {collection_key}")
-
-    root_data_pattern = config["file_pattern"]
-    collection_name = config[collection_key]["collection_name"]
-    print(f"ROOT data: {root_data_pattern}")
-    print(f"Collection: {collection_name}")
-
-    n_constituents = (
-        n_constituents_model
-        if n_constituents_model is not None
-        else all_constituents.shape[1]
-    )
-
-    def cluster_and_score(
-        events,
-        cfg,
-        collection_key,
-        model,
-        device,
-        config_part,
-        n_constituents,
-        apply_pt_correction=True,
-    ):
-        clustered_jets = cluster_candidates(events, cfg, collection_key, dist_param=0.4)
-        sorted_indices = ak.argsort(clustered_jets.pt, axis=1, ascending=False)
-        l1_clustered = clustered_jets[sorted_indices]
-        matched_cands = l1_clustered.constituents
-        const_pt_sort = ak.argsort(matched_cands.pt, axis=2, ascending=False)
-        matched_cands = matched_cands[const_pt_sort]
-
-        j_pt = l1_clustered.pt[:, :, None]
-        j_eta = l1_clustered.eta[:, :, None]
-        j_phi = l1_clustered.phi[:, :, None]
-
-        m_pt = matched_cands.vector.pt
-        m_eta = matched_cands.vector.eta
-        m_phi = matched_cands.vector.phi
-        m_mass = matched_cands.vector.mass
-        m_dxy = matched_cands.dxy
-        m_z0 = matched_cands.z0
-        m_charge = matched_cands.charge
-        m_w = matched_cands.puppiWeight
-        m_id = matched_cands.id
-
-        log_pt_rel = np.log(np.maximum(m_pt, 1e-3) / np.maximum(j_pt, 1e-3))
-        deta = m_eta - j_eta
-        dphi = m_phi - j_phi
-        dphi = (dphi + np.pi) % (2 * np.pi) - np.pi
-        log_dr = np.log(np.maximum(np.sqrt(deta**2 + dphi**2), 1e-3))
-
-        def pad_and_fill(arr, target=n_constituents):
-            return ak.fill_none(ak.pad_none(arr, target, axis=2, clip=True), 0.0)
-
-        feature_list = [
-            pad_and_fill(m_mass),
-            pad_and_fill(m_pt),
-            pad_and_fill(m_eta),
-            pad_and_fill(m_phi),
-            pad_and_fill(m_dxy),
-            pad_and_fill(m_z0),
-            pad_and_fill(m_charge),
-            pad_and_fill(log_pt_rel),
-            pad_and_fill(deta),
-            pad_and_fill(dphi),
-            pad_and_fill(m_w),
-            pad_and_fill(log_dr),
-            pad_and_fill(m_id),
-        ]
-
-        n_jets_per_event = ak.num(l1_clustered, axis=1)
-        n_actual_constituents = ak.num(matched_cands, axis=2)
-        n_actual_flat = ak.to_numpy(ak.flatten(n_actual_constituents, axis=1))
-
-        x_ini = np.stack(
-            [ak.to_numpy(ak.flatten(f, axis=1)) for f in feature_list], axis=-1
-        )
-        flat_ids = x_ini[..., -1]
-        one_hot_ids = one_hot_encode_l1_puppi(flat_ids, n_classes=5)
-        X_feat = np.concatenate([x_ini[..., :-1], one_hot_ids], axis=-1)
-
-        particle_mask = np.zeros((X_feat.shape[0], n_constituents), dtype=bool)
-        for i in range(X_feat.shape[0]):
-            n_real = min(n_actual_flat[i], n_constituents)
-            particle_mask[i, :n_real] = True
-
-        const_vecs = vector.array(
-            {
-                "pt": x_ini[:, :, 1],
-                "eta": x_ini[:, :, 2],
-                "phi": x_ini[:, :, 3],
-                "mass": x_ini[:, :, 0],
-            }
-        )
-        jet_4v = const_vecs.sum(axis=1)
-        flat_jet_pt = jet_4v.pt
-        flat_jet_eta = jet_4v.eta
-        flat_jet_phi = jet_4v.phi
-        flat_jet_mass = jet_4v.mass
-
-        batch_size = config_part.get("training", {}).get("batch_size", 512)
-        all_scores, all_reg = [], []
-        model.eval()
-        with torch.no_grad():
-            for start in range(0, len(X_feat), batch_size):
-                end = min(start + batch_size, len(X_feat))
-                xb = torch.tensor(X_feat[start:end], dtype=torch.float32).to(device)
-                mb = torch.tensor(particle_mask[start:end], dtype=torch.bool).to(device)
-                out = model(xb, particle_mask=mb)
-                scores = (
-                    torch.nn.functional.sigmoid(out["classification"])
-                    .squeeze()
-                    .cpu()
-                    .numpy()
-                )
-                all_scores.append(scores)
-                if "pt" in out:
-                    all_reg.append(out["pt"].squeeze().cpu().numpy())
-
-        all_scores = np.concatenate(all_scores)
-        has_reg = len(all_reg) > 0
-        if has_reg:
-            all_reg = np.concatenate(all_reg)
-
-        if has_reg and apply_pt_correction:
-            corrected_pt = flat_jet_pt * all_reg
-        else:
-            corrected_pt = flat_jet_pt
-
-        corr_vecs = vector.array(
-            {
-                "pt": corrected_pt,
-                "eta": flat_jet_eta,
-                "phi": flat_jet_phi,
-                "mass": flat_jet_mass * (corrected_pt / (flat_jet_pt + 1e-9)),
-            }
-        )
-
-        n_jets_np = ak.to_numpy(n_jets_per_event)
-        cumulative = np.concatenate([[0], np.cumsum(n_jets_np)])
-        evt_pts, evt_etas, evt_phis, evt_masses, evt_scores = [], [], [], [], []
-        for i in range(len(n_jets_np)):
-            s, e = cumulative[i], cumulative[i + 1]
-            evt_pts.append(corr_vecs.pt[s:e])
-            evt_etas.append(corr_vecs.eta[s:e])
-            evt_phis.append(corr_vecs.phi[s:e])
-            evt_masses.append(corr_vecs.mass[s:e])
-            evt_scores.append(all_scores[s:e])
-
-        scored_jets = ak.zip(
-            {
-                "pt": ak.Array(evt_pts),
-                "eta": ak.Array(evt_etas),
-                "phi": ak.Array(evt_phis),
-                "mass": ak.Array(evt_masses),
-                "btag_score": ak.Array(evt_scores),
-            }
-        )
-        scored_jets["vector"] = ak.zip(
-            {
-                "pt": scored_jets.pt,
-                "eta": scored_jets.eta,
-                "phi": scored_jets.phi,
-                "mass": scored_jets.mass,
-            },
-            with_name="Momentum4D",
-        )
-
-        return scored_jets, has_reg
-
-    print("\n--- Loading ROOT data ---")
-    dihiggs_events = load_and_prepare_data(
-        root_data_pattern,
-        config["tree_name"],
-        [collection_name, "GenPart"],
-        max_events=config["max_events"],
-        correct_pt=False,
-        CONFIG=config,
-    )
-
-    print("\n--- Clustering & scoring signal jets ---")
-    scored_jets, has_reg = cluster_and_score(
-        dihiggs_events,
-        config,
-        collection_key,
-        model,
-        device,
-        config_part,
-        n_constituents,
-        apply_pt_correction,
-    )
-
-    n_events_total = len(scored_jets)
-    n_jets_total = int(ak.sum(ak.num(scored_jets, axis=1)))
-    print(f"Clustered & scored {n_jets_total} jets across {n_events_total} events")
-
-    # Step 4: Di-Higgs reconstruction
-    print("\n--- Running di-Higgs reconstruction (notebook-parity AK4 workflow) ---")
-
-    dihiggs_gen_b = select_gen_b_quarks_from_higgs(dihiggs_events)
-    dihiggs_gen_b = dihiggs_gen_b[
-        (dihiggs_gen_b.pt > config["gen"]["pt_cut"])
-        & (abs(dihiggs_gen_b.eta) < config["gen"]["eta_cut"])
-    ]
-
-    # Notebook-parity AK4 flow:
-    # 1) score all clustered jets, keep top-4 (no b-tag threshold)
-    # 2) compute purity/pairing at event level
-    # 3) apply WP threshold afterwards using min(top4 btag)
-    jets_btag_sorted = scored_jets[ak.argsort(scored_jets.btag_score, ascending=False)]
-    has_4_clustered = ak.num(jets_btag_sorted) >= 4
-    sig_jets_all = jets_btag_sorted[has_4_clustered][:, :4]
-    n_sig_4jet = len(sig_jets_all)
-    print(
-        f"Signal events with >=4 clustered jets (pre-threshold): {n_sig_4jet}/{len(jets_btag_sorted)}"
-    )
-
-    if n_sig_4jet > 0:
-        sig_lead_all, sig_sub_all, sig_hh_all = pair_from_4jets(sig_jets_all)
-        _sig_min_btag = ak.to_numpy(sig_jets_all.btag_score[:, 3])
-    else:
-        sig_lead_all = sig_sub_all = sig_hh_all = ak.Array([])
-        _sig_min_btag = np.array([], dtype=np.float64)
-
-    gen_b_for_match = dihiggs_gen_b[has_4_clustered]
-    if n_sig_4jet > 0:
-        dr_reco = sig_jets_all[:, :, None].vector.deltaR(
-            gen_b_for_match[:, None, :].vector
-        )
-        idx_gen_for_reco = ak.argmin(dr_reco, axis=2)
-        min_dr_reco = ak.fill_none(ak.min(dr_reco, axis=2), np.inf)
-
-        dr_gen = gen_b_for_match[:, :, None].vector.deltaR(
-            sig_jets_all[:, None, :].vector
-        )
-        idx_reco_for_gen = ak.argmin(dr_gen, axis=2)
-
-        back_check = idx_reco_for_gen[idx_gen_for_reco]
-        reco_idx = ak.local_index(sig_jets_all, axis=1)
-        pure_mask = (ak.fill_none(back_check, -1) == reco_idx) & (
-            min_dr_reco < config["matching_cone_size"]
-        )
-        _sig_is_pure = ak.to_numpy(ak.sum(pure_mask, axis=1) == 4)
-    else:
-        _sig_is_pure = np.zeros(0, dtype=bool)
-
-    _sig_pair_ok = np.zeros(n_sig_4jet, dtype=bool)
-    _sig_pair_sw = np.zeros(n_sig_4jet, dtype=bool)
-
-    if int(_sig_is_pure.sum()) > 0:
-        print("\n--- Computing Pairing Efficiency (pre-threshold pure events) ---")
-        sig_jets_pure = sig_jets_all[_sig_is_pure][:, :4]
-        sig_gen_b = gen_b_for_match[_sig_is_pure]
-        sig_gen_particles = dihiggs_events.GenPart[has_4_clustered][_sig_is_pure]
-
-        dr_sig = sig_jets_pure[:, :, None].vector.deltaR(sig_gen_b[:, None, :].vector)
-        gmpr = ak.argmin(dr_sig, axis=2)
-
-        _, _, true_h1_idxs, true_h2_idxs = find_gen_b_pairs_with_indices(
-            gmpr,
-            sig_gen_b,
-            sig_gen_particles,
-        )
-        true_h1_sorted = ak.sort(true_h1_idxs, axis=1)
-        true_h2_sorted = ak.sort(true_h2_idxs, axis=1)
-
-        j = [sig_jets_pure[:, i] for i in range(4)]
-        perm_pairs = [([0, 1], [2, 3]), ([0, 2], [1, 3]), ([0, 3], [1, 2])]
-        h_vecs = [
-            (j[a].vector + j[b].vector, j[c].vector + j[d].vector)
-            for (a, b), (c, d) in perm_pairs
-        ]
-        m1 = ak.concatenate([v[0].mass[:, None] for v in h_vecs], axis=1)
-        m2 = ak.concatenate([v[1].mass[:, None] for v in h_vecs], axis=1)
-        d_hh = abs(m1 - (125.0 / 120.0) * m2) / np.sqrt(1 + (125.0 / 120.0) ** 2)
-        best = ak.argmin(d_hh, axis=1)
-
-        p1_c1, p1_c2 = gmpr[:, [0, 1]], gmpr[:, [2, 3]]
-        p2_c1, p2_c2 = gmpr[:, [0, 2]], gmpr[:, [1, 3]]
-        p3_c1, p3_c2 = gmpr[:, [0, 3]], gmpr[:, [1, 2]]
-
-        c0, c1_flag = (best == 0), (best == 1)
-        algo_pair_A = ak.where(
-            c0[:, None], p1_c1, ak.where(c1_flag[:, None], p2_c1, p3_c1)
-        )
-        algo_pair_B = ak.where(
-            c0[:, None], p1_c2, ak.where(c1_flag[:, None], p2_c2, p3_c2)
-        )
-
-        raw_h1_v = ak.where(
-            c0, h_vecs[0][0], ak.where(c1_flag, h_vecs[1][0], h_vecs[2][0])
-        )
-        raw_h2_v = ak.where(
-            c0, h_vecs[0][1], ak.where(c1_flag, h_vecs[1][1], h_vecs[2][1])
-        )
-        is_lead_v = raw_h1_v.pt >= raw_h2_v.pt
-        algo_pair_leading = ak.where(is_lead_v[:, None], algo_pair_A, algo_pair_B)
-        algo_pair_subleading = ak.where(is_lead_v[:, None], algo_pair_B, algo_pair_A)
-        algo_A_sorted = ak.sort(algo_pair_leading, axis=1)
-        algo_B_sorted = ak.sort(algo_pair_subleading, axis=1)
-
-        match_direct = ak.all(algo_A_sorted == true_h1_sorted, axis=1) & ak.all(
-            algo_B_sorted == true_h2_sorted,
-            axis=1,
-        )
-        match_swapped = ak.all(algo_A_sorted == true_h2_sorted, axis=1) & ak.all(
-            algo_B_sorted == true_h1_sorted,
-            axis=1,
-        )
-
-        _sig_pair_ok[_sig_is_pure] = ak.to_numpy(match_direct)
-        _sig_pair_sw[_sig_is_pure] = ak.to_numpy(match_swapped)
-
-    # Signal raw arrays are already computed in one pass above.
-
-    _n_pure_all = int(_sig_is_pure.sum())
-    _pair_eff_all = float(_sig_pair_ok[_sig_is_pure].mean()) if _n_pure_all > 0 else 0.0
-    _pair_sw_all = float(_sig_pair_sw[_sig_is_pure].mean()) if _n_pure_all > 0 else 0.0
-    print(
-        f"Signal purity/pairing (pre-threshold): pure={_n_pure_all}, "
-        f"pair_eff={_pair_eff_all:.2%}, swap={_pair_sw_all:.2%}, "
-        f"total={_pair_eff_all + _pair_sw_all:.2%}"
-    )
-
-    # QCD background — from QCD pT-binned ROOT files
-    print("\n" + "=" * 60)
-    print("Processing QCD BACKGROUND...")
-    print("=" * 60)
-    qcd_config = config["QCD_background"]
-    sigma_to_ngen = {
-        bin_cfg["weight"]: bin_cfg["n_gen"] for bin_cfg in qcd_config.values()
-    }
-    _qcd_min_btag_list = []
-    all_qcd_lead, all_qcd_sub, all_qcd_hh = [], [], []
-    all_qcd_weights_list = []
-    n_qcd_4jet_total = 0
-    n_qcd_events_processed = 0
-
-    for bin_name, bin_cfg in qcd_config.items():
-        print(f"\n--- QCD bin: {bin_name}  (weight={bin_cfg['weight']:.3e}) ---")
-        qcd_file_pattern = bin_cfg["file_pattern"]
-        max_events_bin = bin_cfg.get("max_events", 1000)
-
-        qcd_cfg = dict(config)
-        qcd_cfg["file_pattern"] = qcd_file_pattern
-        qcd_cfg["tree_name"] = bin_cfg["tree_name"]
-        qcd_cfg["max_events"] = max_events_bin
-
-        try:
-            qcd_events = load_and_prepare_data(
-                qcd_file_pattern,
-                bin_cfg["tree_name"],
-                [collection_name, "GenPart"],
-                max_events=max_events_bin,
-                correct_pt=False,
-                CONFIG=qcd_cfg,
-            )
-        except Exception as e:
-            print(f"  Error loading {bin_name}: {e}")
-            continue
-
-        if len(qcd_events) == 0:
-            print(f"  No events loaded for {bin_name}, skipping.")
-            continue
-
-        n_loaded = len(qcd_events)
-        n_qcd_events_processed += n_loaded
-        print(f"  Loaded {n_loaded} events, clustering & scoring...")
-
-        qcd_scored, _ = cluster_and_score(
-            qcd_events,
-            qcd_cfg,
-            collection_key,
-            model,
-            device,
-            config_part,
-            n_constituents,
-            apply_pt_correction,
-        )
-
-        qcd_btag_sorted = qcd_scored[ak.argsort(qcd_scored.btag_score, ascending=False)]
-        has_4_qcd = ak.num(qcd_btag_sorted) >= 4
-        qcd_4jets = qcd_btag_sorted[has_4_qcd][:, :4]
-
-        n_events_bin = int(ak.sum(has_4_qcd))
-        n_events_total_bin = len(qcd_scored)
-        print(f"  Events with >=4 clustered jets: {n_events_bin}/{n_events_total_bin}")
-
-        if n_events_bin > 0:
-            q_lead, q_sub, q_hh = pair_from_4jets(qcd_4jets)
-            _qcd_min_btag_list.append(ak.to_numpy(qcd_4jets.btag_score[:, 3]))
-            all_qcd_lead.append(q_lead)
-            all_qcd_sub.append(q_sub)
-            all_qcd_hh.append(q_hh)
-            all_qcd_weights_list.append(
-                np.full(n_events_bin, bin_cfg["weight"], dtype=np.float64)
-            )
-            n_qcd_4jet_total += n_events_bin
-            print(f"  → {n_events_bin} QCD events with >=4 jets stored")
-        else:
-            print(f"  → No events with >=4 jets in {bin_name}")
-
-    if n_qcd_4jet_total > 0:
-        _qcd_min_btag = np.concatenate(_qcd_min_btag_list)
-        qcd_lead_all = ak.concatenate(all_qcd_lead)
-        qcd_sub_all = ak.concatenate(all_qcd_sub)
-        qcd_hh_all = ak.concatenate(all_qcd_hh)
-        _qcd_weights_raw = np.concatenate(all_qcd_weights_list)
-        print(
-            f"\nTotal QCD with >=4 clustered jets: {n_qcd_4jet_total} "
-            f"from {n_qcd_events_processed} processed"
-        )
-        print(
-            f"QCD raw weights summary: min={_qcd_weights_raw.min():.1e}, "
-            f"max={_qcd_weights_raw.max():.1e}, sum={_qcd_weights_raw.sum():.3e}"
-        )
-        print(
-            f"QCD mHH: weighted mean={np.average(ak.to_numpy(qcd_hh_all.mass), weights=_qcd_weights_raw):.1f}, "
-            f"unweighted median={np.median(ak.to_numpy(qcd_hh_all.mass)):.1f} GeV"
-        )
-    else:
-        _qcd_min_btag = np.array([], dtype=np.float64)
-        qcd_lead_all = qcd_sub_all = qcd_hh_all = ak.Array([])
-        _qcd_weights_raw = np.array([], dtype=np.float64)
-        print("\nNo QCD background events found!")
-
-    # Notebook parity Phase 2: significance sweep and WP selection after matching.
-    _qcd_min_btag = (
-        np.concatenate(_qcd_min_btag_list) if _qcd_min_btag_list else np.array([])
-    )
-    _sig_lead_m = ak.to_numpy(sig_lead_all.mass) if n_sig_4jet > 0 else np.array([])
-    _sig_sub_m = ak.to_numpy(sig_sub_all.mass) if n_sig_4jet > 0 else np.array([])
-    _sig_hh_m = ak.to_numpy(sig_hh_all.mass) if n_sig_4jet > 0 else np.array([])
-    _qcd_lead_m = (
-        ak.to_numpy(qcd_lead_all.mass) if n_qcd_4jet_total > 0 else np.array([])
-    )
-    _qcd_sub_m = ak.to_numpy(qcd_sub_all.mass) if n_qcd_4jet_total > 0 else np.array([])
-    _qcd_hh_m = ak.to_numpy(qcd_hh_all.mass) if n_qcd_4jet_total > 0 else np.array([])
-    _qcd_weights = _qcd_weights_raw if n_qcd_4jet_total > 0 else np.array([])
-
-    # Enforce notebook-parity shape contracts before caching.
-    _n_sig = len(_sig_min_btag)
-    _n_qcd = len(_qcd_min_btag)
-    if not (
-        len(_sig_lead_m)
-        == len(_sig_sub_m)
-        == len(_sig_hh_m)
-        == len(_sig_is_pure)
-        == len(_sig_pair_ok)
-        == len(_sig_pair_sw)
-        == _n_sig
-    ):
-        raise ValueError(
-            "Signal dh_raw array length mismatch: "
-            f"min_btag={_n_sig}, lead={len(_sig_lead_m)}, sub={len(_sig_sub_m)}, "
-            f"hh={len(_sig_hh_m)}, pure={len(_sig_is_pure)}, "
-            f"pair_ok={len(_sig_pair_ok)}, pair_swap={len(_sig_pair_sw)}"
-        )
-    if not (
-        len(_qcd_lead_m)
-        == len(_qcd_sub_m)
-        == len(_qcd_hh_m)
-        == len(_qcd_weights)
-        == _n_qcd
-    ):
-        raise ValueError(
-            "QCD dh_raw array length mismatch: "
-            f"min_btag={_n_qcd}, lead={len(_qcd_lead_m)}, sub={len(_qcd_sub_m)}, "
-            f"hh={len(_qcd_hh_m)}, weights={len(_qcd_weights)}"
-        )
-
-    # ============================================================
-    # Store raw pre-clustered data — used by the next cell
-    # ============================================================
-    dh_raw = {
-        # Signal
-        "sig_min_btag": _sig_min_btag,  # min btag of 4th jet, per event with ≥4 jets
-        "sig_lead_m": _sig_lead_m,
-        "sig_sub_m": _sig_sub_m,
-        "sig_hh_m": _sig_hh_m,
-        "sig_is_pure": _sig_is_pure,  # all 4 jets gen-matched
-        "sig_pair_ok": _sig_pair_ok,  # True: pure + algorithm correct
-        "sig_pair_swap": _sig_pair_sw,  # True: pure + algorithm correct (h1/h2 swapped)
-        # QCD
-        "qcd_min_btag": _qcd_min_btag,
-        "qcd_lead_m": _qcd_lead_m,
-        "qcd_sub_m": _qcd_sub_m,
-        "qcd_hh_m": _qcd_hh_m,
-        "qcd_weights": _qcd_weights,  # raw σ_bin (Convention C)
-        # Metadata
-        "sigma_to_ngen": sigma_to_ngen,
-        "collection_key": collection_key,
-        "has_reg": has_reg,
-        "n_sig_events_loaded": n_sig_4jet,
-        "n_qcd_scanned": n_qcd_events_processed,
-    }
-
-    R_HH_CUT = 55.0
-    N_CUTS = 100
-    _btag_cuts = np.linspace(0.0, 0.99, N_CUTS)
-    _sig_sig = np.zeros(N_CUTS)
-    _S_arr = np.zeros(N_CUTS)
-    _B_arr = np.zeros(N_CUTS)
-
-    for _i, _cut in enumerate(_btag_cuts):
-        _sm = (_sig_min_btag >= _cut) & _sig_is_pure
-        _bm = _qcd_min_btag >= _cut
-        if _sm.sum() == 0 or _bm.sum() == 0:
-            continue
-        _r = compute_significance_at_luminosity(
-            _sig_lead_m[_sm],
-            _sig_sub_m[_sm],
-            _qcd_lead_m[_bm],
-            _qcd_sub_m[_bm],
-            bkg_raw_weights=_qcd_weights_raw[_bm],
-            sigma_to_ngen=sigma_to_ngen,
-            n_gen_signal=N_GEN_SIGNAL,
-            luminosity_fb=LUMINOSITY_FB,
-            signal_xsec_pb=SIGNAL_XSEC_PB,
-            region="circular",
-            r_hh_cut=R_HH_CUT,
-        )
-        _sig_sig[_i] = _r["significance"]
-        _S_arr[_i] = _r["S"]
-        _B_arr[_i] = _r["B"]
-
-    _best_idx = int(np.argmax(_sig_sig))
-    _best_cut = float(_btag_cuts[_best_idx])
-
-    wp_options = {
-        "tight": float(part_wps[0]),
-        "medium": float(part_wps[1]),
-        "loose": float(part_wps[2]),
-        "optimal": _best_cut,
-    }
-
-    print(f"{'='*80}")
-    print(f"B-tag cut sweep  (R_HH < {R_HH_CUT} GeV,  L = {LUMINOSITY_FB:.0f} fb^-1)")
-    print(f"{'='*80}")
-    print(
-        f"{'WP':<10} {'Cut':>7}  {'n_sig':>7}  {'n_qcd':>8}  "
-        f"{'S':>9}  {'B':>10}  {'Signif.':>9}  {'PairEff':>9}"
-    )
-    print("-" * 80)
-    for _wp_name, _wp_cut in wp_options.items():
-        _sm = (_sig_min_btag >= _wp_cut) & _sig_is_pure
-        _bm = _qcd_min_btag >= _wp_cut
-        _n_s = int(_sm.sum())
-        _n_b = int(_bm.sum())
-        if _n_s == 0 or _n_b == 0:
-            print(f"  {_wp_name:<8} {_wp_cut:>7.4f}  {'0':>7}  {'0':>8}  -")
-            continue
-
-        _r = compute_significance_at_luminosity(
-            _sig_lead_m[_sm],
-            _sig_sub_m[_sm],
-            _qcd_lead_m[_bm],
-            _qcd_sub_m[_bm],
-            bkg_raw_weights=_qcd_weights_raw[_bm],
-            sigma_to_ngen=sigma_to_ngen,
-            n_gen_signal=N_GEN_SIGNAL,
-            luminosity_fb=LUMINOSITY_FB,
-            signal_xsec_pb=SIGNAL_XSEC_PB,
-            region="circular",
-            r_hh_cut=R_HH_CUT,
-        )
-
-        _pure_at_wp = _sm
-        _eff_wp = _sig_pair_ok[_pure_at_wp].sum() / max(_pure_at_wp.sum(), 1)
-        _star = " *" if _wp_name == "optimal" else ""
-        print(
-            f"  {_wp_name:<8} {_wp_cut:>7.4f}  {_n_s:>7}  {_n_b:>8}  "
-            f"{_r['S']:>9.1f}  {_r['B']:>10.2e}  {_r['significance']:>9.3f}  "
-            f"{_eff_wp:>9.2%}{_star}"
-        )
-    print(f"{'='*80}")
-    print(f"  Optimal cut: {_best_cut:.4f}  (max significance in sweep)")
-
-    fig_sweep, ax_sweep = plt.subplots(figsize=(9, 4))
-    ax_sweep.plot(_btag_cuts, _sig_sig, color="mediumpurple", linewidth=2)
-    ax_sweep.axvline(
-        _best_cut,
-        color="red",
-        linestyle="--",
-        linewidth=1.5,
-        label=f"Optimal = {_best_cut:.3f}",
-    )
-    ax_sweep.scatter([_best_cut], [_sig_sig[_best_idx]], color="red", s=90, zorder=6)
-    for _wp_name, _wp_cut in wp_options.items():
-        if _wp_name == "optimal":
-            continue
-        ax_sweep.axvline(
-            _wp_cut,
-            linestyle=":",
-            linewidth=1.2,
-            label=f"{_wp_name} = {_wp_cut:.3f}",
-        )
-    ax_sweep.set_xlabel("ParT btag_score threshold (all 4 jets >= cut)")
-    ax_sweep.set_ylabel("Significance $S/\\sqrt{S+B}$")
-    ax_sweep.set_title(f"Significance vs b-tag cut (R_HH < {R_HH_CUT} GeV)")
-    ax_sweep.legend(fontsize=9)
-    ax_sweep.grid(True, alpha=0.3)
-    plt.tight_layout()
-    save_fig(fig_sweep, "ak4_significance_vs_btag_cut")
-    plt.close(fig_sweep)
-
-    WP_SELECTION = "loose"  # choose from: tight | medium | loose | optimal
-    PART_BTAG_THRESHOLD = wp_options[WP_SELECTION]
-    print(f"\nSelected WP: {WP_SELECTION}  (threshold = {PART_BTAG_THRESHOLD:.4f})")
-
-    _sig_mask = (_sig_min_btag >= PART_BTAG_THRESHOLD) & _sig_is_pure
-    _qcd_mask = _qcd_min_btag >= PART_BTAG_THRESHOLD
-    _tot_mask = _sig_min_btag >= PART_BTAG_THRESHOLD
-
-    n_signal = int(_sig_mask.sum())
-    n_qcd = int(_qcd_mask.sum())
-    n_total = int(_tot_mask.sum())
-
-    if n_signal > 0:
-        pair_eff = float(_sig_pair_ok[_sig_mask].sum() / max(n_signal, 1))
-        eff_swapped = float(_sig_pair_sw[_sig_mask].sum() / max(n_signal, 1))
-    else:
-        pair_eff = 0.0
-        eff_swapped = 0.0
-
-    sig_lead = sig_lead_all[_sig_mask] if n_sig_4jet > 0 else ak.Array([])
-    sig_sub = sig_sub_all[_sig_mask] if n_sig_4jet > 0 else ak.Array([])
-    sig_hh = sig_hh_all[_sig_mask] if n_sig_4jet > 0 else ak.Array([])
-    qcd_lead = qcd_lead_all[_qcd_mask] if n_qcd_4jet_total > 0 else ak.Array([])
-    qcd_sub = qcd_sub_all[_qcd_mask] if n_qcd_4jet_total > 0 else ak.Array([])
-    qcd_hh = qcd_hh_all[_qcd_mask] if n_qcd_4jet_total > 0 else ak.Array([])
-    qcd_weights = (
-        _qcd_weights_raw[_qcd_mask]
-        if n_qcd_4jet_total > 0
-        else np.array([], dtype=np.float64)
-    )
-
-    part_dihiggs_result = {
-        "label": f"Trained ParT ({WP_SELECTION} = {PART_BTAG_THRESHOLD:.4f})",
-        "n_total": n_total,
-        "n_signal": n_signal,
-        "n_qcd": n_qcd,
-        "sig_lead": sig_lead,
-        "sig_sub": sig_sub,
-        "sig_hh": sig_hh,
-        "qcd_lead": qcd_lead,
-        "qcd_sub": qcd_sub,
-        "qcd_hh": qcd_hh,
-        "qcd_weights": qcd_weights,
-        "sigma_to_ngen": sigma_to_ngen,
-        "collection_key": collection_key,
-        "wp": WP_SELECTION,
-        "threshold": PART_BTAG_THRESHOLD,
-        "has_regression": has_reg,
-        "pair_eff": float(pair_eff),
-        "eff_swapped": float(eff_swapped),
-    }
-    print(f"\n{'='*60}")
-    print(f"Di-Higgs reconstruction complete")
-    print(f"  Collection: {collection_key} ({dataset_used})")
-    print(f"  Working point: {WP_SELECTION} (threshold={PART_BTAG_THRESHOLD:.4f})")
-    print(
-        f"  Selected: {n_total} events with >=4 jets above threshold = "
-        f"{n_total/max(n_sig_4jet,1)*100:.2f}% of {n_sig_4jet} pre-threshold 4-jet events"
-    )
-    print(
-        f"  Signal (all 4 pure, above threshold): {n_signal} events ({n_signal/max(n_total,1)*100:.1f}%))"
-    )
-    print(
-        f"  QCD background: {n_qcd} events (from {n_qcd_events_processed} QCD events processed)"
-    )
-    print(f"  pT regression: {'applied' if has_reg else 'not available'}")
-    print(
-        f"  Pairing eff @WP: {pair_eff:.2%} | Swapped: {eff_swapped:.2%} | Total: {pair_eff + eff_swapped:.2%}"
-    )
-    print(f"{'='*60}")
-
-    # ── Cell 23: Top-N jet purity efficiency ─────────────────────────
-    def get_eff_first_jet_pure(gen_b_quarks, reco_jets, tagger_name, n, k):
-        pt_ordered = reco_jets[ak.argsort(reco_jets.vector.pt, ascending=False)]
-        tag_ordered = reco_jets[ak.argsort(reco_jets[tagger_name], ascending=False)]
-
-        pt_ordered_purity_idxs = get_pure_jet_idxs_cross_matched(
-            gen_b_quarks, pt_ordered
-        )
-        tag_ordered_purity_idxs = get_pure_jet_idxs_cross_matched(
-            gen_b_quarks, tag_ordered
-        )
-
-        num_highest_pt_pure = ak.any(pt_ordered_purity_idxs == 0, axis=1)
-        eff_highest_pt_pure = ak.sum(num_highest_pt_pure) / len(gen_b_quarks)
-        print(f"Eff highest pt jet is pure: {eff_highest_pt_pure:.4f}")
-
-        num_highest_tag_pure = ak.any(tag_ordered_purity_idxs == 0, axis=1)
-        eff_highest_tag_pure = ak.sum(num_highest_tag_pure) / len(gen_b_quarks)
-        print(f"Eff highest {tagger_name} jet is pure: {eff_highest_tag_pure:.4f}")
-
-        n = 4
-        range_k = range(k + 1)
-        more_than_n_eff_pt = []
-        more_than_n_eff_tag = []
-        for k in range_k:
-            num_k_highest_pt_pure = (ak.num(pt_ordered_purity_idxs) == n) & (
-                ak.all(pt_ordered_purity_idxs < k, axis=1)
-            )
-            eff_k_highest_pt_pure = ak.sum(num_k_highest_pt_pure) / len(gen_b_quarks)
-            more_than_n_eff_pt.append(eff_k_highest_pt_pure)
-
-            num_k_highest_tag_pure = (ak.num(tag_ordered_purity_idxs) == n) & (
-                ak.all(tag_ordered_purity_idxs < k, axis=1)
-            )
-            eff_k_highest_tag_pure = ak.sum(num_k_highest_tag_pure) / len(gen_b_quarks)
-            more_than_n_eff_tag.append(eff_k_highest_tag_pure)
-
-        return (
-            eff_highest_pt_pure,
-            eff_highest_tag_pure,
-            more_than_n_eff_pt,
-            more_than_n_eff_tag,
-        )
-
-    n_eff = 4
-    k_eff = 25
-    range_k = range(k_eff + 1)
-
-    (
-        eff_highest_pt_pure_part,
-        eff_highest_btag_pure_part,
-        more_than_n_eff_pt_part,
-        more_than_n_eff_btag_part,
-    ) = get_eff_first_jet_pure(dihiggs_gen_b, scored_jets, "btag_score", n_eff, k_eff)
-
-    print(f"\nPlotting Top-N Jet Efficiencies for N = {n_eff}...")
-    fig_eff_pt, ax_pt = plt.subplots(figsize=(10, 6))
-    ax_pt.step(
-        range_k, more_than_n_eff_pt_part, where="mid", label="ParT pT", color="purple"
-    )
-    ax_pt.set_xlabel("k (Number of Top Jets Considered)")
-    ax_pt.set_ylabel(f"Probability of Finding at least {n_eff} b-jets")
-    ax_pt.set_title(
-        f"Probability of Finding at least {n_eff} b-jets vs. Top k Jets (pT ordered)"
-    )
-    ax_pt.grid(True, linestyle="--", alpha=0.6)
-    ax_pt.legend()
-    save_fig(fig_eff_pt, "top_n_eff_pt_ordering")
-    plt.close(fig_eff_pt)
-
-    fig_eff_btag, ax_btag = plt.subplots(figsize=(10, 6))
-    ax_btag.step(
-        range_k,
-        more_than_n_eff_btag_part,
-        where="mid",
-        label="ParT BTag",
-        color="purple",
-    )
-    ax_btag.set_xlabel("k (Number of Top Jets Considered)")
-    ax_btag.set_ylabel(f"Probability of Finding at least {n_eff} b-jets")
-    ax_btag.set_title(
-        f"Probability of Finding at least {n_eff} b-jets vs. Top k Jets (BTag ordered)"
-    )
-    ax_btag.grid(True, linestyle="--", alpha=0.6)
-    ax_btag.legend()
-    save_fig(fig_eff_btag, "top_n_eff_btag_ordering")
-    plt.close(fig_eff_btag)
-
-    # ── Cell 24: Di-Higgs mass distribution plots ────────────────────
-    res = part_dihiggs_result
-    label = res["label"]
-    color_dh = "purple"
-    qcd_weights = res.get("qcd_weights", np.ones(res["n_qcd"]))
-
-    sig_window_h = (90, 160)
-    sig_window_hh = (250, 550)
-    R_HH_CUT = 55.0
-
-    # 1. Signal vs QCD: 1x3 overlay
-    fig, axes = plt.subplots(1, 3, figsize=(24, 7))
-    bins_h = np.linspace(0, 300, 61)
-    bins_hh = np.linspace(200, 800, 61)
-
-    ax = axes[0]
-    if res["n_signal"] > 0:
-        ax.hist(
-            ak.to_numpy(res["sig_lead"].mass),
-            bins=bins_h,
-            histtype="stepfilled",
-            alpha=0.3,
-            color=color_dh,
-            label=f'Signal ({res["n_signal"]})',
-            density=True,
-        )
-        ax.hist(
-            ak.to_numpy(res["sig_lead"].mass),
-            bins=bins_h,
-            histtype="step",
-            linewidth=2,
-            color=color_dh,
-            density=True,
-        )
-    if res["n_qcd"] > 0:
-        ax.hist(
-            ak.to_numpy(res["qcd_lead"].mass),
-            bins=bins_h,
-            histtype="step",
-            linewidth=2,
-            color="grey",
-            linestyle="--",
-            label=f'QCD bkg ({res["n_qcd"]})',
-            density=True,
-        )
-    ax.axvline(125, color="green", linestyle=":", linewidth=1.5)
-    ax.axvspan(*sig_window_h, alpha=0.05, color="green")
-    ax.set_xlabel("Leading $m_H$ [GeV]")
-    ax.set_ylabel("Events / 5 GeV")
-    ax.set_title(f"{label} — Leading Higgs")
-    ax.legend(fontsize=10)
-
-    ax = axes[1]
-    if res["n_signal"] > 0:
-        ax.hist(
-            ak.to_numpy(res["sig_sub"].mass),
-            bins=bins_h,
-            histtype="stepfilled",
-            alpha=0.3,
-            color=color_dh,
-            label="Signal",
-            density=True,
-        )
-        ax.hist(
-            ak.to_numpy(res["sig_sub"].mass),
-            bins=bins_h,
-            histtype="step",
-            linewidth=2,
-            color=color_dh,
-            density=True,
-        )
-    if res["n_qcd"] > 0:
-        ax.hist(
-            ak.to_numpy(res["qcd_sub"].mass),
-            bins=bins_h,
-            histtype="step",
-            linewidth=2,
-            color="grey",
-            linestyle="--",
-            label="QCD bkg",
-            density=True,
-        )
-    ax.axvline(125, color="green", linestyle=":", linewidth=1.5)
-    ax.axvspan(*sig_window_h, alpha=0.05, color="green")
-    ax.set_xlabel("Subleading $m_H$ [GeV]")
-    ax.set_ylabel("Events / 5 GeV")
-    ax.set_title(f"{label} — Subleading Higgs")
-    ax.legend(fontsize=10)
-
-    ax = axes[2]
-    if res["n_signal"] > 0:
-        ax.hist(
-            ak.to_numpy(res["sig_hh"].mass),
-            bins=bins_hh,
-            histtype="stepfilled",
-            alpha=0.3,
-            color=color_dh,
-            label="Signal",
-            density=True,
-        )
-        ax.hist(
-            ak.to_numpy(res["sig_hh"].mass),
-            bins=bins_hh,
-            histtype="step",
-            linewidth=2,
-            color=color_dh,
-            density=True,
-        )
-    if res["n_qcd"] > 0:
-        ax.hist(
-            ak.to_numpy(res["qcd_hh"].mass),
-            bins=bins_hh,
-            histtype="step",
-            linewidth=2,
-            color="grey",
-            linestyle="--",
-            label="QCD bkg",
-            density=True,
-        )
-    ax.axvspan(*sig_window_hh, alpha=0.05, color="green")
-    ax.set_xlabel("$m_{HH}$ [GeV]")
-    ax.set_ylabel("Events / 10 GeV")
-    ax.set_title(f"{label} — $m_{{HH}}$")
-    ax.legend(fontsize=10)
-
-    reg_tag = (
-        "pT-corrected"
-        if res["has_regression"] and apply_pt_correction
-        else "uncorrected pT"
-    )
-    fig.suptitle(f"Di-Higgs Reconstruction — {label} ({reg_tag})", fontsize=16, y=1.01)
-    plt.tight_layout()
-    save_fig(fig, f"dihiggs_mass_1d_{WP_SELECTION}")
-    plt.close(fig)
-
-    # 2. 2D mH1 vs mH2
-
-    bins_2d = np.linspace(0, 300, 61)
-    fig, axes = plt.subplots(1, 2, figsize=(20, 8))
-    for ax_idx, (category, lead_key, sub_key, n_events) in enumerate(
-        [
-            ("Signal", "sig_lead", "sig_sub", res["n_signal"]),
-            ("QCD Background", "qcd_lead", "qcd_sub", res["n_qcd"]),
-        ]
-    ):
-        ax = axes[ax_idx]
-        if n_events > 0:
-            lead_mass = ak.to_numpy(res[lead_key].mass)
-            sub_mass = ak.to_numpy(res[sub_key].mass)
-            r_hh_vals = R_hh_func(lead_mass, sub_mass)
-            sel = r_hh_vals < 550.0
-            h = ax.hist2d(
-                lead_mass[sel], sub_mass[sel], bins=[bins_2d, bins_2d], cmap="viridis"
-            )
-            ax.axvline(
-                125, color="red", linestyle="--", linewidth=1.5, label="$m_H$ = 125 GeV"
-            )
-            ax.axhline(120, color="red", linestyle="--", linewidth=1.5)
-            ellipse = Ellipse(
-                xy=(125, 120),
-                width=110,
-                height=96,
-                angle=0,
-                edgecolor="yellow",
-                facecolor="none",
-                linestyle="--",
-                linewidth=2,
-                label="$R_{HH}$ = 55 GeV",
-            )
-            ax.add_patch(ellipse)
-            n_sel = int(np.sum(sel))
-            ax.set_title(
-                f"{label} — {category}\n({n_sel} events inside $R_{{HH}}$ / {n_events} total)"
-            )
-            fig.colorbar(h[3], ax=ax, label="Events")
-        else:
-            ax.text(
-                0.5,
-                0.5,
-                f"No {category.lower()} events",
-                ha="center",
-                va="center",
-                transform=ax.transAxes,
-                fontsize=14,
-            )
-            ax.set_title(f"{label} — {category}")
-        ax.set_xlabel("Leading Higgs Mass [GeV]")
-        ax.set_ylabel("Subleading Higgs Mass [GeV]")
-        ax.legend(loc="upper right", fontsize=10)
-
-    fig.suptitle(
-        f"2D $m_{{H1}}$ vs $m_{{H2}}$ — {label} ({reg_tag})", fontsize=16, y=1.02
-    )
-    plt.tight_layout()
-    save_fig(fig, f"dihiggs_mass_2d_{WP_SELECTION}")
-    plt.close(fig)
-
-    # 3. Significance summary
-    print(f"\n{'='*70}")
-    print(
-        f"{'Tagger':<30} {'S':>6} {'B (wtd)':>10} {'S/√(S+B)':>10}  |  {'S (window)':>10} {'B (window)':>12} {'S/√(S+B)':>10}"
-    )
-    print(
-        f"{'':30} {'(all)':>6} {'(all)':>10} {'(all)':>10}  |  {str(sig_window_hh):>10} {str(sig_window_hh):>12} {'(window)':>10}"
-    )
-    print("-" * 90)
-    if res["n_signal"] > 0 and res["n_qcd"] > 0:
-        sigma_to_ngen = res.get("sigma_to_ngen", {})
-        sig_mh1 = ak.to_numpy(res["sig_lead"].mass)
-        sig_mh2 = ak.to_numpy(res["sig_sub"].mass)
-        bkg_mh1 = ak.to_numpy(res["qcd_lead"].mass)
-        bkg_mh2 = ak.to_numpy(res["qcd_sub"].mass)
-
-        # mHH window significance via luminosity-scaled wrapper
-        result_mhh = compute_significance_at_luminosity(
-            sig_mh1,
-            sig_mh2,
-            bkg_mh1,
-            bkg_mh2,
-            bkg_raw_weights=qcd_weights,
-            sigma_to_ngen=sigma_to_ngen,
-            n_gen_signal=N_GEN_SIGNAL,
-            luminosity_fb=LUMINOSITY_FB,
-            signal_xsec_pb=SIGNAL_XSEC_PB,
-            region="circular",
-            rect_window=sig_window_hh,
-        )
-        S_win = result_mhh["S"]
-        B_win = result_mhh["B"]
-        signif_win = result_mhh["significance"]
-
-        _sw = signal_weight(len(sig_mh1), LUMINOSITY_FB, SIGNAL_XSEC_PB, N_GEN_SIGNAL)
-        _bw = scale_qcd_weights_raw(qcd_weights, sigma_to_ngen, LUMINOSITY_FB)
-        S_all = float(np.sum(_sw))
-        B_all = float(np.sum(_bw))
-        signif_all = S_all / np.sqrt(S_all + B_all) if (S_all + B_all) > 0 else 0
-        print(
-            f"{label:<30} {S_all:>6.0f} {B_all:>10.1e} {signif_all:>10.4f}  |  {S_win:>10.0f} {B_win:>12.1e} {signif_win:>10.4f}"
-        )
-        print(
-            f"\n  Note: S and B are luminosity-scaled expected event counts at {LUMINOSITY_FB:.0f} fb^-1."
-        )
-        print(f"  Unweighted QCD events: {res['n_qcd']}")
-    else:
-        print(f"{label:<30}  Insufficient events for significance")
-
-    # 4. R_HH distribution (signal vs weighted QCD)
-    fig, ax = plt.subplots(figsize=(10, 7))
-    rhh_bins = np.linspace(0, 300, 61)
-
-    if res["n_signal"] > 0:
-        sig_rhh = R_hh_func(
-            ak.to_numpy(res["sig_lead"].mass),
-            ak.to_numpy(res["sig_sub"].mass),
-        )
-        ax.hist(
-            sig_rhh,
-            bins=rhh_bins,
-            histtype="stepfilled",
-            alpha=0.30,
-            color=color_dh,
-            label=f'Signal ({res["n_signal"]})',
-        )
-        ax.hist(sig_rhh, bins=rhh_bins, histtype="step", linewidth=2, color=color_dh)
-
-    if res["n_qcd"] > 0:
-        bkg_rhh = R_hh_func(
-            ak.to_numpy(res["qcd_lead"].mass),
-            ak.to_numpy(res["qcd_sub"].mass),
-        )
-        ax.hist(
-            bkg_rhh,
-            bins=rhh_bins,
-            histtype="step",
-            linewidth=2,
-            color="grey",
-            linestyle="--",
-            label=f'QCD ({res["n_qcd"]} events, weighted)',
-            weights=qcd_weights,
-        )
-
-    ax.axvline(
-        R_HH_CUT,
-        color="red",
-        linestyle=":",
-        linewidth=2,
-        label=f"$R_{{HH}}$ cut = {R_HH_CUT:.0f} GeV",
-    )
-    ax.axvspan(0, R_HH_CUT, alpha=0.06, color="red")
-    ax.set_xlabel("$R_{HH}$ [GeV]")
-    ax.set_ylabel("Events / 5 GeV (QCD weighted)")
-    ax.set_title(f"{label} - $R_{{HH}}$ distribution")
-    ax.set_yscale("log")
-    ax.grid(True, alpha=0.3, which="both")
-    ax.legend(fontsize=10)
-    plt.tight_layout()
-    save_fig(fig, f"rhh_distribution_{WP_SELECTION}")
-    plt.close(fig)
-
-    # 5. 2D mH1 vs mH2 with R_HH ellipse
-    bins_2d_rhh = np.linspace(0, 300, 61)
-    fig, axes = plt.subplots(1, 2, figsize=(20, 8))
-
-    for ax_idx, (category, lead_key, sub_key, n_events, w) in enumerate(
-        [
-            ("Signal", "sig_lead", "sig_sub", res["n_signal"], None),
-            ("Simulated QCD", "qcd_lead", "qcd_sub", res["n_qcd"], qcd_weights),
-        ]
-    ):
-        ax = axes[ax_idx]
-
-        if n_events > 0:
-            lead_mass = ak.to_numpy(res[lead_key].mass)
-            sub_mass = ak.to_numpy(res[sub_key].mass)
-            r_hh_vals = R_hh_func(lead_mass, sub_mass)
-            sel = r_hh_vals < R_HH_CUT
-
-            h = ax.hist2d(
-                lead_mass,
-                sub_mass,
-                bins=[bins_2d_rhh, bins_2d_rhh],
-                cmap="viridis",
-                weights=w,
-            )
-
-            ax.axvline(
-                125,
-                color="red",
-                linestyle="--",
-                linewidth=1.5,
-                label="$m_{H1}=125$ GeV",
-            )
-            ax.axhline(120, color="red", linestyle="--", linewidth=1.5)
-
-            ellipse = Ellipse(
-                xy=(125, 120),
-                width=2 * R_HH_CUT,
-                height=2 * R_HH_CUT,
-                angle=0,
-                edgecolor="yellow",
-                facecolor="none",
-                linestyle="--",
-                linewidth=2,
-                label=f"$R_{{HH}}$ = {R_HH_CUT:.0f} GeV",
-            )
-            ax.add_patch(ellipse)
-
-            n_sel = int(np.sum(sel))
-            if w is not None:
-                w_sel = float(np.sum(w[sel]))
-                w_tot = float(np.sum(w))
-                ax.set_title(
-                    f"{label} - {category}\n"
-                    f"({n_sel}/{n_events} inside $R_{{HH}}$, weighted: {w_sel:.1e}/{w_tot:.1e})"
-                )
-            else:
-                ax.set_title(
-                    f"{label} - {category}\n({n_sel}/{n_events} inside $R_{{HH}}$)"
-                )
-
-            fig.colorbar(
-                h[3],
-                ax=ax,
-                label="Weighted Events" if w is not None else "Events",
-            )
-        else:
-            ax.text(
-                0.5,
-                0.5,
-                f"No {category.lower()} events",
-                ha="center",
-                va="center",
-                transform=ax.transAxes,
-                fontsize=14,
-            )
-            ax.set_title(f"{label} - {category}")
-
-        ax.set_xlabel("Leading Higgs Mass [GeV]")
-        ax.set_ylabel("Subleading Higgs Mass [GeV]")
-        ax.legend(loc="upper right", fontsize=10)
-
-    fig.suptitle(
-        f"2D $m_{{H1}}$ vs $m_{{H2}}$ - {label} ({reg_tag}), $R_{{HH}}<{R_HH_CUT:.0f}$",
-        fontsize=16,
-        y=1.02,
-    )
-    plt.tight_layout()
-    save_fig(fig, f"dihiggs_mass_2d_rhh_{WP_SELECTION}")
-    plt.close(fig)
-
-    print("=" * 90)
-    print(f"\nWorking point: {WP_SELECTION} (threshold={PART_BTAG_THRESHOLD:.4f})")
-    print(
-        f"pT regression: {'applied' if res['has_regression'] and apply_pt_correction else 'not applied'}"
-    )
-    print(f"Collection: {res['collection_key']}")
-    print(f"\nAll di-Higgs plots saved to: {plot_dir}")
-
-    # ============================================================
-    # CACHE: Save paired di-Higgs candidate data for offline plotting
-    # Run after the WP-sweep cell (cell 35). Saves both:
-    #   - dh_raw arrays (pre-WP): lets you re-run the WP sweep offline
-    #   - part_dihiggs_result arrays (WP-filtered): ready for direct plotting
-    #
-    # Output: plot_dir/dihiggs_result_{collection_key}_{WP_SELECTION}.npz
-    #
-    # To reload in another notebook:
-    #   c = np.load(path, allow_pickle=False)
-    #   sigma_to_ngen = dict(zip(c["sigma_to_ngen_keys"], c["sigma_to_ngen_vals"]))
-    #   # Raw dh_raw-style dict:
-    #   dh_raw_loaded = {k: c[k] for k in ["sig_min_btag","sig_lead_m","sig_sub_m",
-    #       "sig_hh_m","sig_is_pure","sig_pair_ok","sig_pair_swap",
-    #       "qcd_min_btag","qcd_lead_m","qcd_sub_m","qcd_hh_m"]}
-    #   dh_raw_loaded["qcd_weights"] = c["qcd_weights_raw"]
-    #   dh_raw_loaded["sigma_to_ngen"] = sigma_to_ngen
-    #   # WP-filtered numpy arrays (no awkward needed):
-    #   sig_lead_m = c["sig_lead_m_wp"]; sig_sub_m = c["sig_sub_m_wp"]
-    #   qcd_lead_m = c["qcd_lead_m_wp"]; qcd_weights_raw = c["qcd_weights_wp"]
-    # ============================================================
-    _res = part_dihiggs_result
-    _cache_fname = f"dihiggs_result_{collection_key}_{WP_SELECTION}.npz"
-    _cache_path = os.path.join(plot_dir, _cache_fname)
-    print(f"Saving di-Higgs cache → {_cache_path}")
-
-    _s2n_keys = np.array(list(dh_raw["sigma_to_ngen"].keys()), dtype=np.float64)
-    _s2n_vals = np.array(list(dh_raw["sigma_to_ngen"].values()), dtype=np.float64)
-
-    np.savez_compressed(
-        _cache_path,
-        # ── Metadata ──────────────────────────────────────────────────────────────
-        collection_key=np.array(collection_key),
-        wp_selection=np.array(WP_SELECTION),
-        threshold=np.array(PART_BTAG_THRESHOLD),
-        has_regression=np.array(dh_raw["has_reg"]),
-        apply_pt_correction=np.array(apply_pt_correction),
-        model_label=np.array(config_part.get("exp_name", "trained_model")),
-        luminosity_fb=np.array(LUMINOSITY_FB),
-        signal_xsec_pb=np.array(SIGNAL_XSEC_PB),
-        n_gen_signal=np.array(N_GEN_SIGNAL),
-        r_hh_cut=np.array(R_HH_CUT),
-        n_sig_events_loaded=np.array(dh_raw["n_sig_events_loaded"]),
-        n_qcd_scanned=np.array(dh_raw["n_qcd_scanned"]),
-        # sigma_to_ngen serialised as parallel arrays (no pickle needed)
-        sigma_to_ngen_keys=_s2n_keys,
-        sigma_to_ngen_vals=_s2n_vals,
-        pair_eff=np.array(_res["pair_eff"]),
-        eff_swapped=np.array(_res["eff_swapped"]),
-        # ── Raw per-event arrays from dh_raw (pre-WP) — needed for WP sweep ──────
-        sig_min_btag=dh_raw["sig_min_btag"],
-        sig_lead_m=dh_raw["sig_lead_m"],
-        sig_sub_m=dh_raw["sig_sub_m"],
-        sig_hh_m=dh_raw["sig_hh_m"],
-        sig_is_pure=dh_raw["sig_is_pure"],
-        sig_pair_ok=dh_raw["sig_pair_ok"],
-        sig_pair_swap=dh_raw["sig_pair_swap"],
-        qcd_min_btag=dh_raw["qcd_min_btag"],
-        qcd_lead_m=dh_raw["qcd_lead_m"],
-        qcd_sub_m=dh_raw["qcd_sub_m"],
-        qcd_hh_m=dh_raw["qcd_hh_m"],
-        qcd_weights_raw=dh_raw["qcd_weights"],  # raw σ_bin (Convention C)
-        # ── WP-filtered arrays from part_dihiggs_result — ready for plotting ──────
-        sig_lead_m_wp=ak.to_numpy(_res["sig_lead"].mass),
-        sig_sub_m_wp=ak.to_numpy(_res["sig_sub"].mass),
-        sig_hh_m_wp=ak.to_numpy(_res["sig_hh"].mass),
-        qcd_lead_m_wp=ak.to_numpy(_res["qcd_lead"].mass),
-        qcd_sub_m_wp=ak.to_numpy(_res["qcd_sub"].mass),
-        qcd_hh_m_wp=ak.to_numpy(_res["qcd_hh"].mass),
-        qcd_weights_wp=_res["qcd_weights"],  # raw σ_bin filtered at WP
-        n_signal=np.array(_res["n_signal"]),
-        n_qcd=np.array(_res["n_qcd"]),
-        n_total=np.array(_res["n_total"]),
-    )
-
-    print(f"Saved: {_cache_path}")
-    print(
-        f"  Raw signal events  : {len(dh_raw['sig_min_btag']):,}  (pre-WP, all ≥4 jets)"
-    )
-    print(
-        f"  Raw QCD events     : {len(dh_raw['qcd_min_btag']):,}  (pre-WP, all ≥4 jets)"
-    )
-    print(
-        f"  Signal @ WP        : {_res['n_signal']:,}  (pure, threshold={PART_BTAG_THRESHOLD:.4f})"
-    )
-    print(f"  QCD @ WP           : {_res['n_qcd']:,}")
-    print(
-        f"  Pair efficiency    : {_res['pair_eff']:.2%}  (+swap {_res['eff_swapped']:.2%})"
-    )
+    # # ── Cell 22: Di-Higgs mass reconstruction with trained ParT ──────
+    # # Configuration
+    # apply_pt_correction = True
+
+    # dataset_used = (
+    #     config_part.get("training", {}).get("data", {}).get("use_dataset", "pf")
+    # )
+    # if dataset_used == "pf":
+    #     collection_key = "l1extpf"
+    # elif dataset_used == "puppi":
+    #     collection_key = "l1extpuppi"
+    # else:
+    #     collection_key = "l1barrelextpf"
+    # print(f"Model was trained on: {dataset_used} → clustering {collection_key}")
+
+    # root_data_pattern = config["file_pattern"]
+    # collection_name = config[collection_key]["collection_name"]
+    # print(f"ROOT data: {root_data_pattern}")
+    # print(f"Collection: {collection_name}")
+
+    # n_constituents = (
+    #     n_constituents_model
+    #     if n_constituents_model is not None
+    #     else all_constituents.shape[1]
+    # )
+
+    # def cluster_and_score(
+    #     events,
+    #     cfg,
+    #     collection_key,
+    #     model,
+    #     device,
+    #     config_part,
+    #     n_constituents,
+    #     apply_pt_correction=True,
+    # ):
+    #     clustered_jets = cluster_candidates(events, cfg, collection_key, dist_param=0.4)
+    #     sorted_indices = ak.argsort(clustered_jets.pt, axis=1, ascending=False)
+    #     l1_clustered = clustered_jets[sorted_indices]
+    #     matched_cands = l1_clustered.constituents
+    #     const_pt_sort = ak.argsort(matched_cands.pt, axis=2, ascending=False)
+    #     matched_cands = matched_cands[const_pt_sort]
+
+    #     j_pt = l1_clustered.pt[:, :, None]
+    #     j_eta = l1_clustered.eta[:, :, None]
+    #     j_phi = l1_clustered.phi[:, :, None]
+
+    #     m_pt = matched_cands.vector.pt
+    #     m_eta = matched_cands.vector.eta
+    #     m_phi = matched_cands.vector.phi
+    #     m_mass = matched_cands.vector.mass
+    #     m_dxy = matched_cands.dxy
+    #     m_z0 = matched_cands.z0
+    #     m_charge = matched_cands.charge
+    #     m_w = matched_cands.puppiWeight
+    #     m_id = matched_cands.id
+
+    #     log_pt_rel = np.log(np.maximum(m_pt, 1e-3) / np.maximum(j_pt, 1e-3))
+    #     deta = m_eta - j_eta
+    #     dphi = m_phi - j_phi
+    #     dphi = (dphi + np.pi) % (2 * np.pi) - np.pi
+    #     log_dr = np.log(np.maximum(np.sqrt(deta**2 + dphi**2), 1e-3))
+
+    #     def pad_and_fill(arr, target=n_constituents):
+    #         return ak.fill_none(ak.pad_none(arr, target, axis=2, clip=True), 0.0)
+
+    #     feature_list = [
+    #         pad_and_fill(m_mass),
+    #         pad_and_fill(m_pt),
+    #         pad_and_fill(m_eta),
+    #         pad_and_fill(m_phi),
+    #         pad_and_fill(m_dxy),
+    #         pad_and_fill(m_z0),
+    #         pad_and_fill(m_charge),
+    #         pad_and_fill(log_pt_rel),
+    #         pad_and_fill(deta),
+    #         pad_and_fill(dphi),
+    #         pad_and_fill(m_w),
+    #         pad_and_fill(log_dr),
+    #         pad_and_fill(m_id),
+    #     ]
+
+    #     n_jets_per_event = ak.num(l1_clustered, axis=1)
+    #     n_actual_constituents = ak.num(matched_cands, axis=2)
+    #     n_actual_flat = ak.to_numpy(ak.flatten(n_actual_constituents, axis=1))
+
+    #     x_ini = np.stack(
+    #         [ak.to_numpy(ak.flatten(f, axis=1)) for f in feature_list], axis=-1
+    #     )
+    #     flat_ids = x_ini[..., -1]
+    #     one_hot_ids = one_hot_encode_l1_puppi(flat_ids, n_classes=5)
+    #     X_feat = np.concatenate([x_ini[..., :-1], one_hot_ids], axis=-1)
+
+    #     particle_mask = np.zeros((X_feat.shape[0], n_constituents), dtype=bool)
+    #     for i in range(X_feat.shape[0]):
+    #         n_real = min(n_actual_flat[i], n_constituents)
+    #         particle_mask[i, :n_real] = True
+
+    #     const_vecs = vector.array(
+    #         {
+    #             "pt": x_ini[:, :, 1],
+    #             "eta": x_ini[:, :, 2],
+    #             "phi": x_ini[:, :, 3],
+    #             "mass": x_ini[:, :, 0],
+    #         }
+    #     )
+    #     jet_4v = const_vecs.sum(axis=1)
+    #     flat_jet_pt = jet_4v.pt
+    #     flat_jet_eta = jet_4v.eta
+    #     flat_jet_phi = jet_4v.phi
+    #     flat_jet_mass = jet_4v.mass
+
+    #     batch_size = config_part.get("training", {}).get("batch_size", 512)
+    #     all_scores, all_reg = [], []
+    #     model.eval()
+    #     with torch.no_grad():
+    #         for start in range(0, len(X_feat), batch_size):
+    #             end = min(start + batch_size, len(X_feat))
+    #             xb = torch.tensor(X_feat[start:end], dtype=torch.float32).to(device)
+    #             mb = torch.tensor(particle_mask[start:end], dtype=torch.bool).to(device)
+    #             out = model(xb, particle_mask=mb)
+    #             scores = (
+    #                 torch.nn.functional.sigmoid(out["classification"])
+    #                 .squeeze()
+    #                 .cpu()
+    #                 .numpy()
+    #             )
+    #             all_scores.append(scores)
+    #             if "pt" in out:
+    #                 all_reg.append(out["pt"].squeeze().cpu().numpy())
+
+    #     all_scores = np.concatenate(all_scores)
+    #     has_reg = len(all_reg) > 0
+    #     if has_reg:
+    #         all_reg = np.concatenate(all_reg)
+
+    #     if has_reg and apply_pt_correction:
+    #         corrected_pt = flat_jet_pt * all_reg
+    #     else:
+    #         corrected_pt = flat_jet_pt
+
+    #     corr_vecs = vector.array(
+    #         {
+    #             "pt": corrected_pt,
+    #             "eta": flat_jet_eta,
+    #             "phi": flat_jet_phi,
+    #             "mass": flat_jet_mass * (corrected_pt / (flat_jet_pt + 1e-9)),
+    #         }
+    #     )
+
+    #     n_jets_np = ak.to_numpy(n_jets_per_event)
+    #     cumulative = np.concatenate([[0], np.cumsum(n_jets_np)])
+    #     evt_pts, evt_etas, evt_phis, evt_masses, evt_scores = [], [], [], [], []
+    #     for i in range(len(n_jets_np)):
+    #         s, e = cumulative[i], cumulative[i + 1]
+    #         evt_pts.append(corr_vecs.pt[s:e])
+    #         evt_etas.append(corr_vecs.eta[s:e])
+    #         evt_phis.append(corr_vecs.phi[s:e])
+    #         evt_masses.append(corr_vecs.mass[s:e])
+    #         evt_scores.append(all_scores[s:e])
+
+    #     scored_jets = ak.zip(
+    #         {
+    #             "pt": ak.Array(evt_pts),
+    #             "eta": ak.Array(evt_etas),
+    #             "phi": ak.Array(evt_phis),
+    #             "mass": ak.Array(evt_masses),
+    #             "btag_score": ak.Array(evt_scores),
+    #         }
+    #     )
+    #     scored_jets["vector"] = ak.zip(
+    #         {
+    #             "pt": scored_jets.pt,
+    #             "eta": scored_jets.eta,
+    #             "phi": scored_jets.phi,
+    #             "mass": scored_jets.mass,
+    #         },
+    #         with_name="Momentum4D",
+    #     )
+
+    #     return scored_jets, has_reg
+
+    # print("\n--- Loading ROOT data ---")
+    # dihiggs_events = load_and_prepare_data(
+    #     root_data_pattern,
+    #     config["tree_name"],
+    #     [collection_name, "GenPart"],
+    #     max_events=config["max_events"],
+    #     correct_pt=False,
+    #     CONFIG=config,
+    # )
+
+    # print("\n--- Clustering & scoring signal jets ---")
+    # scored_jets, has_reg = cluster_and_score(
+    #     dihiggs_events,
+    #     config,
+    #     collection_key,
+    #     model,
+    #     device,
+    #     config_part,
+    #     n_constituents,
+    #     apply_pt_correction,
+    # )
+
+    # n_events_total = len(scored_jets)
+    # n_jets_total = int(ak.sum(ak.num(scored_jets, axis=1)))
+    # print(f"Clustered & scored {n_jets_total} jets across {n_events_total} events")
+
+    # # Step 4: Di-Higgs reconstruction
+    # print("\n--- Running di-Higgs reconstruction (notebook-parity AK4 workflow) ---")
+
+    # dihiggs_gen_b = select_gen_b_quarks_from_higgs(dihiggs_events)
+    # dihiggs_gen_b = dihiggs_gen_b[
+    #     (dihiggs_gen_b.pt > config["gen"]["pt_cut"])
+    #     & (abs(dihiggs_gen_b.eta) < config["gen"]["eta_cut"])
+    # ]
+
+    # # Notebook-parity AK4 flow:
+    # # 1) score all clustered jets, keep top-4 (no b-tag threshold)
+    # # 2) compute purity/pairing at event level
+    # # 3) apply WP threshold afterwards using min(top4 btag)
+    # jets_btag_sorted = scored_jets[ak.argsort(scored_jets.btag_score, ascending=False)]
+    # has_4_clustered = ak.num(jets_btag_sorted) >= 4
+    # sig_jets_all = jets_btag_sorted[has_4_clustered][:, :4]
+    # n_sig_4jet = len(sig_jets_all)
+    # print(
+    #     f"Signal events with >=4 clustered jets (pre-threshold): {n_sig_4jet}/{len(jets_btag_sorted)}"
+    # )
+
+    # if n_sig_4jet > 0:
+    #     sig_lead_all, sig_sub_all, sig_hh_all = pair_from_4jets(sig_jets_all)
+    #     _sig_min_btag = ak.to_numpy(sig_jets_all.btag_score[:, 3])
+    # else:
+    #     sig_lead_all = sig_sub_all = sig_hh_all = ak.Array([])
+    #     _sig_min_btag = np.array([], dtype=np.float64)
+
+    # gen_b_for_match = dihiggs_gen_b[has_4_clustered]
+    # if n_sig_4jet > 0:
+    #     dr_reco = sig_jets_all[:, :, None].vector.deltaR(
+    #         gen_b_for_match[:, None, :].vector
+    #     )
+    #     idx_gen_for_reco = ak.argmin(dr_reco, axis=2)
+    #     min_dr_reco = ak.fill_none(ak.min(dr_reco, axis=2), np.inf)
+
+    #     dr_gen = gen_b_for_match[:, :, None].vector.deltaR(
+    #         sig_jets_all[:, None, :].vector
+    #     )
+    #     idx_reco_for_gen = ak.argmin(dr_gen, axis=2)
+
+    #     back_check = idx_reco_for_gen[idx_gen_for_reco]
+    #     reco_idx = ak.local_index(sig_jets_all, axis=1)
+    #     pure_mask = (ak.fill_none(back_check, -1) == reco_idx) & (
+    #         min_dr_reco < config["matching_cone_size"]
+    #     )
+    #     _sig_is_pure = ak.to_numpy(ak.sum(pure_mask, axis=1) == 4)
+    # else:
+    #     _sig_is_pure = np.zeros(0, dtype=bool)
+
+    # _sig_pair_ok = np.zeros(n_sig_4jet, dtype=bool)
+    # _sig_pair_sw = np.zeros(n_sig_4jet, dtype=bool)
+
+    # if int(_sig_is_pure.sum()) > 0:
+    #     print("\n--- Computing Pairing Efficiency (pre-threshold pure events) ---")
+    #     sig_jets_pure = sig_jets_all[_sig_is_pure][:, :4]
+    #     sig_gen_b = gen_b_for_match[_sig_is_pure]
+    #     sig_gen_particles = dihiggs_events.GenPart[has_4_clustered][_sig_is_pure]
+
+    #     dr_sig = sig_jets_pure[:, :, None].vector.deltaR(sig_gen_b[:, None, :].vector)
+    #     gmpr = ak.argmin(dr_sig, axis=2)
+
+    #     _, _, true_h1_idxs, true_h2_idxs = find_gen_b_pairs_with_indices(
+    #         gmpr,
+    #         sig_gen_b,
+    #         sig_gen_particles,
+    #     )
+    #     true_h1_sorted = ak.sort(true_h1_idxs, axis=1)
+    #     true_h2_sorted = ak.sort(true_h2_idxs, axis=1)
+
+    #     j = [sig_jets_pure[:, i] for i in range(4)]
+    #     perm_pairs = [([0, 1], [2, 3]), ([0, 2], [1, 3]), ([0, 3], [1, 2])]
+    #     h_vecs = [
+    #         (j[a].vector + j[b].vector, j[c].vector + j[d].vector)
+    #         for (a, b), (c, d) in perm_pairs
+    #     ]
+    #     m1 = ak.concatenate([v[0].mass[:, None] for v in h_vecs], axis=1)
+    #     m2 = ak.concatenate([v[1].mass[:, None] for v in h_vecs], axis=1)
+    #     d_hh = abs(m1 - (125.0 / 120.0) * m2) / np.sqrt(1 + (125.0 / 120.0) ** 2)
+    #     best = ak.argmin(d_hh, axis=1)
+
+    #     p1_c1, p1_c2 = gmpr[:, [0, 1]], gmpr[:, [2, 3]]
+    #     p2_c1, p2_c2 = gmpr[:, [0, 2]], gmpr[:, [1, 3]]
+    #     p3_c1, p3_c2 = gmpr[:, [0, 3]], gmpr[:, [1, 2]]
+
+    #     c0, c1_flag = (best == 0), (best == 1)
+    #     algo_pair_A = ak.where(
+    #         c0[:, None], p1_c1, ak.where(c1_flag[:, None], p2_c1, p3_c1)
+    #     )
+    #     algo_pair_B = ak.where(
+    #         c0[:, None], p1_c2, ak.where(c1_flag[:, None], p2_c2, p3_c2)
+    #     )
+
+    #     raw_h1_v = ak.where(
+    #         c0, h_vecs[0][0], ak.where(c1_flag, h_vecs[1][0], h_vecs[2][0])
+    #     )
+    #     raw_h2_v = ak.where(
+    #         c0, h_vecs[0][1], ak.where(c1_flag, h_vecs[1][1], h_vecs[2][1])
+    #     )
+    #     is_lead_v = raw_h1_v.pt >= raw_h2_v.pt
+    #     algo_pair_leading = ak.where(is_lead_v[:, None], algo_pair_A, algo_pair_B)
+    #     algo_pair_subleading = ak.where(is_lead_v[:, None], algo_pair_B, algo_pair_A)
+    #     algo_A_sorted = ak.sort(algo_pair_leading, axis=1)
+    #     algo_B_sorted = ak.sort(algo_pair_subleading, axis=1)
+
+    #     match_direct = ak.all(algo_A_sorted == true_h1_sorted, axis=1) & ak.all(
+    #         algo_B_sorted == true_h2_sorted,
+    #         axis=1,
+    #     )
+    #     match_swapped = ak.all(algo_A_sorted == true_h2_sorted, axis=1) & ak.all(
+    #         algo_B_sorted == true_h1_sorted,
+    #         axis=1,
+    #     )
+
+    #     _sig_pair_ok[_sig_is_pure] = ak.to_numpy(match_direct)
+    #     _sig_pair_sw[_sig_is_pure] = ak.to_numpy(match_swapped)
+
+    # # Signal raw arrays are already computed in one pass above.
+
+    # _n_pure_all = int(_sig_is_pure.sum())
+    # _pair_eff_all = float(_sig_pair_ok[_sig_is_pure].mean()) if _n_pure_all > 0 else 0.0
+    # _pair_sw_all = float(_sig_pair_sw[_sig_is_pure].mean()) if _n_pure_all > 0 else 0.0
+    # print(
+    #     f"Signal purity/pairing (pre-threshold): pure={_n_pure_all}, "
+    #     f"pair_eff={_pair_eff_all:.2%}, swap={_pair_sw_all:.2%}, "
+    #     f"total={_pair_eff_all + _pair_sw_all:.2%}"
+    # )
+
+    # # QCD background — from QCD pT-binned ROOT files
+    # print("\n" + "=" * 60)
+    # print("Processing QCD BACKGROUND...")
+    # print("=" * 60)
+    # qcd_config = config["QCD_background"]
+    # sigma_to_ngen = {
+    #     bin_cfg["weight"]: bin_cfg["n_gen"] for bin_cfg in qcd_config.values()
+    # }
+    # _qcd_min_btag_list = []
+    # all_qcd_lead, all_qcd_sub, all_qcd_hh = [], [], []
+    # all_qcd_weights_list = []
+    # n_qcd_4jet_total = 0
+    # n_qcd_events_processed = 0
+
+    # for bin_name, bin_cfg in qcd_config.items():
+    #     print(f"\n--- QCD bin: {bin_name}  (weight={bin_cfg['weight']:.3e}) ---")
+    #     qcd_file_pattern = bin_cfg["file_pattern"]
+    #     max_events_bin = bin_cfg.get("max_events", 1000)
+
+    #     qcd_cfg = dict(config)
+    #     qcd_cfg["file_pattern"] = qcd_file_pattern
+    #     qcd_cfg["tree_name"] = bin_cfg["tree_name"]
+    #     qcd_cfg["max_events"] = max_events_bin
+
+    #     try:
+    #         qcd_events = load_and_prepare_data(
+    #             qcd_file_pattern,
+    #             bin_cfg["tree_name"],
+    #             [collection_name, "GenPart"],
+    #             max_events=max_events_bin,
+    #             correct_pt=False,
+    #             CONFIG=qcd_cfg,
+    #         )
+    #     except Exception as e:
+    #         print(f"  Error loading {bin_name}: {e}")
+    #         continue
+
+    #     if len(qcd_events) == 0:
+    #         print(f"  No events loaded for {bin_name}, skipping.")
+    #         continue
+
+    #     n_loaded = len(qcd_events)
+    #     n_qcd_events_processed += n_loaded
+    #     print(f"  Loaded {n_loaded} events, clustering & scoring...")
+
+    #     qcd_scored, _ = cluster_and_score(
+    #         qcd_events,
+    #         qcd_cfg,
+    #         collection_key,
+    #         model,
+    #         device,
+    #         config_part,
+    #         n_constituents,
+    #         apply_pt_correction,
+    #     )
+
+    #     qcd_btag_sorted = qcd_scored[ak.argsort(qcd_scored.btag_score, ascending=False)]
+    #     has_4_qcd = ak.num(qcd_btag_sorted) >= 4
+    #     qcd_4jets = qcd_btag_sorted[has_4_qcd][:, :4]
+
+    #     n_events_bin = int(ak.sum(has_4_qcd))
+    #     n_events_total_bin = len(qcd_scored)
+    #     print(f"  Events with >=4 clustered jets: {n_events_bin}/{n_events_total_bin}")
+
+    #     if n_events_bin > 0:
+    #         q_lead, q_sub, q_hh = pair_from_4jets(qcd_4jets)
+    #         _qcd_min_btag_list.append(ak.to_numpy(qcd_4jets.btag_score[:, 3]))
+    #         all_qcd_lead.append(q_lead)
+    #         all_qcd_sub.append(q_sub)
+    #         all_qcd_hh.append(q_hh)
+    #         all_qcd_weights_list.append(
+    #             np.full(n_events_bin, bin_cfg["weight"], dtype=np.float64)
+    #         )
+    #         n_qcd_4jet_total += n_events_bin
+    #         print(f"  → {n_events_bin} QCD events with >=4 jets stored")
+    #     else:
+    #         print(f"  → No events with >=4 jets in {bin_name}")
+
+    # if n_qcd_4jet_total > 0:
+    #     _qcd_min_btag = np.concatenate(_qcd_min_btag_list)
+    #     qcd_lead_all = ak.concatenate(all_qcd_lead)
+    #     qcd_sub_all = ak.concatenate(all_qcd_sub)
+    #     qcd_hh_all = ak.concatenate(all_qcd_hh)
+    #     _qcd_weights_raw = np.concatenate(all_qcd_weights_list)
+    #     print(
+    #         f"\nTotal QCD with >=4 clustered jets: {n_qcd_4jet_total} "
+    #         f"from {n_qcd_events_processed} processed"
+    #     )
+    #     print(
+    #         f"QCD raw weights summary: min={_qcd_weights_raw.min():.1e}, "
+    #         f"max={_qcd_weights_raw.max():.1e}, sum={_qcd_weights_raw.sum():.3e}"
+    #     )
+    #     print(
+    #         f"QCD mHH: weighted mean={np.average(ak.to_numpy(qcd_hh_all.mass), weights=_qcd_weights_raw):.1f}, "
+    #         f"unweighted median={np.median(ak.to_numpy(qcd_hh_all.mass)):.1f} GeV"
+    #     )
+    # else:
+    #     _qcd_min_btag = np.array([], dtype=np.float64)
+    #     qcd_lead_all = qcd_sub_all = qcd_hh_all = ak.Array([])
+    #     _qcd_weights_raw = np.array([], dtype=np.float64)
+    #     print("\nNo QCD background events found!")
+
+    # # Notebook parity Phase 2: significance sweep and WP selection after matching.
+    # _qcd_min_btag = (
+    #     np.concatenate(_qcd_min_btag_list) if _qcd_min_btag_list else np.array([])
+    # )
+    # _sig_lead_m = ak.to_numpy(sig_lead_all.mass) if n_sig_4jet > 0 else np.array([])
+    # _sig_sub_m = ak.to_numpy(sig_sub_all.mass) if n_sig_4jet > 0 else np.array([])
+    # _sig_hh_m = ak.to_numpy(sig_hh_all.mass) if n_sig_4jet > 0 else np.array([])
+    # _qcd_lead_m = (
+    #     ak.to_numpy(qcd_lead_all.mass) if n_qcd_4jet_total > 0 else np.array([])
+    # )
+    # _qcd_sub_m = ak.to_numpy(qcd_sub_all.mass) if n_qcd_4jet_total > 0 else np.array([])
+    # _qcd_hh_m = ak.to_numpy(qcd_hh_all.mass) if n_qcd_4jet_total > 0 else np.array([])
+    # _qcd_weights = _qcd_weights_raw if n_qcd_4jet_total > 0 else np.array([])
+
+    # # Enforce notebook-parity shape contracts before caching.
+    # _n_sig = len(_sig_min_btag)
+    # _n_qcd = len(_qcd_min_btag)
+    # if not (
+    #     len(_sig_lead_m)
+    #     == len(_sig_sub_m)
+    #     == len(_sig_hh_m)
+    #     == len(_sig_is_pure)
+    #     == len(_sig_pair_ok)
+    #     == len(_sig_pair_sw)
+    #     == _n_sig
+    # ):
+    #     raise ValueError(
+    #         "Signal dh_raw array length mismatch: "
+    #         f"min_btag={_n_sig}, lead={len(_sig_lead_m)}, sub={len(_sig_sub_m)}, "
+    #         f"hh={len(_sig_hh_m)}, pure={len(_sig_is_pure)}, "
+    #         f"pair_ok={len(_sig_pair_ok)}, pair_swap={len(_sig_pair_sw)}"
+    #     )
+    # if not (
+    #     len(_qcd_lead_m)
+    #     == len(_qcd_sub_m)
+    #     == len(_qcd_hh_m)
+    #     == len(_qcd_weights)
+    #     == _n_qcd
+    # ):
+    #     raise ValueError(
+    #         "QCD dh_raw array length mismatch: "
+    #         f"min_btag={_n_qcd}, lead={len(_qcd_lead_m)}, sub={len(_qcd_sub_m)}, "
+    #         f"hh={len(_qcd_hh_m)}, weights={len(_qcd_weights)}"
+    #     )
+
+    # # ============================================================
+    # # Store raw pre-clustered data — used by the next cell
+    # # ============================================================
+    # dh_raw = {
+    #     # Signal
+    #     "sig_min_btag": _sig_min_btag,  # min btag of 4th jet, per event with ≥4 jets
+    #     "sig_lead_m": _sig_lead_m,
+    #     "sig_sub_m": _sig_sub_m,
+    #     "sig_hh_m": _sig_hh_m,
+    #     "sig_is_pure": _sig_is_pure,  # all 4 jets gen-matched
+    #     "sig_pair_ok": _sig_pair_ok,  # True: pure + algorithm correct
+    #     "sig_pair_swap": _sig_pair_sw,  # True: pure + algorithm correct (h1/h2 swapped)
+    #     # QCD
+    #     "qcd_min_btag": _qcd_min_btag,
+    #     "qcd_lead_m": _qcd_lead_m,
+    #     "qcd_sub_m": _qcd_sub_m,
+    #     "qcd_hh_m": _qcd_hh_m,
+    #     "qcd_weights": _qcd_weights,  # raw σ_bin (Convention C)
+    #     # Metadata
+    #     "sigma_to_ngen": sigma_to_ngen,
+    #     "collection_key": collection_key,
+    #     "has_reg": has_reg,
+    #     "n_sig_events_loaded": n_sig_4jet,
+    #     "n_qcd_scanned": n_qcd_events_processed,
+    # }
+
+    # R_HH_CUT = 55.0
+    # N_CUTS = 100
+    # _btag_cuts = np.linspace(0.0, 0.99, N_CUTS)
+    # _sig_sig = np.zeros(N_CUTS)
+    # _S_arr = np.zeros(N_CUTS)
+    # _B_arr = np.zeros(N_CUTS)
+
+    # for _i, _cut in enumerate(_btag_cuts):
+    #     _sm = (_sig_min_btag >= _cut) & _sig_is_pure
+    #     _bm = _qcd_min_btag >= _cut
+    #     if _sm.sum() == 0 or _bm.sum() == 0:
+    #         continue
+    #     _r = compute_significance_at_luminosity(
+    #         _sig_lead_m[_sm],
+    #         _sig_sub_m[_sm],
+    #         _qcd_lead_m[_bm],
+    #         _qcd_sub_m[_bm],
+    #         bkg_raw_weights=_qcd_weights_raw[_bm],
+    #         sigma_to_ngen=sigma_to_ngen,
+    #         n_gen_signal=N_GEN_SIGNAL,
+    #         luminosity_fb=LUMINOSITY_FB,
+    #         signal_xsec_pb=SIGNAL_XSEC_PB,
+    #         region="circular",
+    #         r_hh_cut=R_HH_CUT,
+    #     )
+    #     _sig_sig[_i] = _r["significance"]
+    #     _S_arr[_i] = _r["S"]
+    #     _B_arr[_i] = _r["B"]
+
+    # _best_idx = int(np.argmax(_sig_sig))
+    # _best_cut = float(_btag_cuts[_best_idx])
+
+    # wp_options = {
+    #     "tight": float(part_wps[0]),
+    #     "medium": float(part_wps[1]),
+    #     "loose": float(part_wps[2]),
+    #     "optimal": _best_cut,
+    # }
+
+    # print(f"{'='*80}")
+    # print(f"B-tag cut sweep  (R_HH < {R_HH_CUT} GeV,  L = {LUMINOSITY_FB:.0f} fb^-1)")
+    # print(f"{'='*80}")
+    # print(
+    #     f"{'WP':<10} {'Cut':>7}  {'n_sig':>7}  {'n_qcd':>8}  "
+    #     f"{'S':>9}  {'B':>10}  {'Signif.':>9}  {'PairEff':>9}"
+    # )
+    # print("-" * 80)
+    # for _wp_name, _wp_cut in wp_options.items():
+    #     _sm = (_sig_min_btag >= _wp_cut) & _sig_is_pure
+    #     _bm = _qcd_min_btag >= _wp_cut
+    #     _n_s = int(_sm.sum())
+    #     _n_b = int(_bm.sum())
+    #     if _n_s == 0 or _n_b == 0:
+    #         print(f"  {_wp_name:<8} {_wp_cut:>7.4f}  {'0':>7}  {'0':>8}  -")
+    #         continue
+
+    #     _r = compute_significance_at_luminosity(
+    #         _sig_lead_m[_sm],
+    #         _sig_sub_m[_sm],
+    #         _qcd_lead_m[_bm],
+    #         _qcd_sub_m[_bm],
+    #         bkg_raw_weights=_qcd_weights_raw[_bm],
+    #         sigma_to_ngen=sigma_to_ngen,
+    #         n_gen_signal=N_GEN_SIGNAL,
+    #         luminosity_fb=LUMINOSITY_FB,
+    #         signal_xsec_pb=SIGNAL_XSEC_PB,
+    #         region="circular",
+    #         r_hh_cut=R_HH_CUT,
+    #     )
+
+    #     _pure_at_wp = _sm
+    #     _eff_wp = _sig_pair_ok[_pure_at_wp].sum() / max(_pure_at_wp.sum(), 1)
+    #     _star = " *" if _wp_name == "optimal" else ""
+    #     print(
+    #         f"  {_wp_name:<8} {_wp_cut:>7.4f}  {_n_s:>7}  {_n_b:>8}  "
+    #         f"{_r['S']:>9.1f}  {_r['B']:>10.2e}  {_r['significance']:>9.3f}  "
+    #         f"{_eff_wp:>9.2%}{_star}"
+    #     )
+    # print(f"{'='*80}")
+    # print(f"  Optimal cut: {_best_cut:.4f}  (max significance in sweep)")
+
+    # fig_sweep, ax_sweep = plt.subplots(figsize=(9, 4))
+    # ax_sweep.plot(_btag_cuts, _sig_sig, color="mediumpurple", linewidth=2)
+    # ax_sweep.axvline(
+    #     _best_cut,
+    #     color="red",
+    #     linestyle="--",
+    #     linewidth=1.5,
+    #     label=f"Optimal = {_best_cut:.3f}",
+    # )
+    # ax_sweep.scatter([_best_cut], [_sig_sig[_best_idx]], color="red", s=90, zorder=6)
+    # for _wp_name, _wp_cut in wp_options.items():
+    #     if _wp_name == "optimal":
+    #         continue
+    #     ax_sweep.axvline(
+    #         _wp_cut,
+    #         linestyle=":",
+    #         linewidth=1.2,
+    #         label=f"{_wp_name} = {_wp_cut:.3f}",
+    #     )
+    # ax_sweep.set_xlabel("ParT btag_score threshold (all 4 jets >= cut)")
+    # ax_sweep.set_ylabel("Significance $S/\\sqrt{S+B}$")
+    # ax_sweep.set_title(f"Significance vs b-tag cut (R_HH < {R_HH_CUT} GeV)")
+    # ax_sweep.legend(fontsize=9)
+    # ax_sweep.grid(True, alpha=0.3)
+    # plt.tight_layout()
+    # save_fig(fig_sweep, "ak4_significance_vs_btag_cut")
+    # plt.close(fig_sweep)
+
+    # WP_SELECTION = "loose"  # choose from: tight | medium | loose | optimal
+    # PART_BTAG_THRESHOLD = wp_options[WP_SELECTION]
+    # print(f"\nSelected WP: {WP_SELECTION}  (threshold = {PART_BTAG_THRESHOLD:.4f})")
+
+    # _sig_mask = (_sig_min_btag >= PART_BTAG_THRESHOLD) & _sig_is_pure
+    # _qcd_mask = _qcd_min_btag >= PART_BTAG_THRESHOLD
+    # _tot_mask = _sig_min_btag >= PART_BTAG_THRESHOLD
+
+    # n_signal = int(_sig_mask.sum())
+    # n_qcd = int(_qcd_mask.sum())
+    # n_total = int(_tot_mask.sum())
+
+    # if n_signal > 0:
+    #     pair_eff = float(_sig_pair_ok[_sig_mask].sum() / max(n_signal, 1))
+    #     eff_swapped = float(_sig_pair_sw[_sig_mask].sum() / max(n_signal, 1))
+    # else:
+    #     pair_eff = 0.0
+    #     eff_swapped = 0.0
+
+    # sig_lead = sig_lead_all[_sig_mask] if n_sig_4jet > 0 else ak.Array([])
+    # sig_sub = sig_sub_all[_sig_mask] if n_sig_4jet > 0 else ak.Array([])
+    # sig_hh = sig_hh_all[_sig_mask] if n_sig_4jet > 0 else ak.Array([])
+    # qcd_lead = qcd_lead_all[_qcd_mask] if n_qcd_4jet_total > 0 else ak.Array([])
+    # qcd_sub = qcd_sub_all[_qcd_mask] if n_qcd_4jet_total > 0 else ak.Array([])
+    # qcd_hh = qcd_hh_all[_qcd_mask] if n_qcd_4jet_total > 0 else ak.Array([])
+    # qcd_weights = (
+    #     _qcd_weights_raw[_qcd_mask]
+    #     if n_qcd_4jet_total > 0
+    #     else np.array([], dtype=np.float64)
+    # )
+
+    # part_dihiggs_result = {
+    #     "label": f"Trained ParT ({WP_SELECTION} = {PART_BTAG_THRESHOLD:.4f})",
+    #     "n_total": n_total,
+    #     "n_signal": n_signal,
+    #     "n_qcd": n_qcd,
+    #     "sig_lead": sig_lead,
+    #     "sig_sub": sig_sub,
+    #     "sig_hh": sig_hh,
+    #     "qcd_lead": qcd_lead,
+    #     "qcd_sub": qcd_sub,
+    #     "qcd_hh": qcd_hh,
+    #     "qcd_weights": qcd_weights,
+    #     "sigma_to_ngen": sigma_to_ngen,
+    #     "collection_key": collection_key,
+    #     "wp": WP_SELECTION,
+    #     "threshold": PART_BTAG_THRESHOLD,
+    #     "has_regression": has_reg,
+    #     "pair_eff": float(pair_eff),
+    #     "eff_swapped": float(eff_swapped),
+    # }
+    # print(f"\n{'='*60}")
+    # print(f"Di-Higgs reconstruction complete")
+    # print(f"  Collection: {collection_key} ({dataset_used})")
+    # print(f"  Working point: {WP_SELECTION} (threshold={PART_BTAG_THRESHOLD:.4f})")
+    # print(
+    #     f"  Selected: {n_total} events with >=4 jets above threshold = "
+    #     f"{n_total/max(n_sig_4jet,1)*100:.2f}% of {n_sig_4jet} pre-threshold 4-jet events"
+    # )
+    # print(
+    #     f"  Signal (all 4 pure, above threshold): {n_signal} events ({n_signal/max(n_total,1)*100:.1f}%))"
+    # )
+    # print(
+    #     f"  QCD background: {n_qcd} events (from {n_qcd_events_processed} QCD events processed)"
+    # )
+    # print(f"  pT regression: {'applied' if has_reg else 'not available'}")
+    # print(
+    #     f"  Pairing eff @WP: {pair_eff:.2%} | Swapped: {eff_swapped:.2%} | Total: {pair_eff + eff_swapped:.2%}"
+    # )
+    # print(f"{'='*60}")
+
+    # # ── Cell 23: Top-N jet purity efficiency ─────────────────────────
+    # def get_eff_first_jet_pure(gen_b_quarks, reco_jets, tagger_name, n, k):
+    #     pt_ordered = reco_jets[ak.argsort(reco_jets.vector.pt, ascending=False)]
+    #     tag_ordered = reco_jets[ak.argsort(reco_jets[tagger_name], ascending=False)]
+
+    #     pt_ordered_purity_idxs = get_pure_jet_idxs_cross_matched(
+    #         gen_b_quarks, pt_ordered
+    #     )
+    #     tag_ordered_purity_idxs = get_pure_jet_idxs_cross_matched(
+    #         gen_b_quarks, tag_ordered
+    #     )
+
+    #     num_highest_pt_pure = ak.any(pt_ordered_purity_idxs == 0, axis=1)
+    #     eff_highest_pt_pure = ak.sum(num_highest_pt_pure) / len(gen_b_quarks)
+    #     print(f"Eff highest pt jet is pure: {eff_highest_pt_pure:.4f}")
+
+    #     num_highest_tag_pure = ak.any(tag_ordered_purity_idxs == 0, axis=1)
+    #     eff_highest_tag_pure = ak.sum(num_highest_tag_pure) / len(gen_b_quarks)
+    #     print(f"Eff highest {tagger_name} jet is pure: {eff_highest_tag_pure:.4f}")
+
+    #     n = 4
+    #     range_k = range(k + 1)
+    #     more_than_n_eff_pt = []
+    #     more_than_n_eff_tag = []
+    #     for k in range_k:
+    #         num_k_highest_pt_pure = (ak.num(pt_ordered_purity_idxs) == n) & (
+    #             ak.all(pt_ordered_purity_idxs < k, axis=1)
+    #         )
+    #         eff_k_highest_pt_pure = ak.sum(num_k_highest_pt_pure) / len(gen_b_quarks)
+    #         more_than_n_eff_pt.append(eff_k_highest_pt_pure)
+
+    #         num_k_highest_tag_pure = (ak.num(tag_ordered_purity_idxs) == n) & (
+    #             ak.all(tag_ordered_purity_idxs < k, axis=1)
+    #         )
+    #         eff_k_highest_tag_pure = ak.sum(num_k_highest_tag_pure) / len(gen_b_quarks)
+    #         more_than_n_eff_tag.append(eff_k_highest_tag_pure)
+
+    #     return (
+    #         eff_highest_pt_pure,
+    #         eff_highest_tag_pure,
+    #         more_than_n_eff_pt,
+    #         more_than_n_eff_tag,
+    #     )
+
+    # n_eff = 4
+    # k_eff = 25
+    # range_k = range(k_eff + 1)
+
+    # (
+    #     eff_highest_pt_pure_part,
+    #     eff_highest_btag_pure_part,
+    #     more_than_n_eff_pt_part,
+    #     more_than_n_eff_btag_part,
+    # ) = get_eff_first_jet_pure(dihiggs_gen_b, scored_jets, "btag_score", n_eff, k_eff)
+
+    # print(f"\nPlotting Top-N Jet Efficiencies for N = {n_eff}...")
+    # fig_eff_pt, ax_pt = plt.subplots(figsize=(10, 6))
+    # ax_pt.step(
+    #     range_k, more_than_n_eff_pt_part, where="mid", label="ParT pT", color="purple"
+    # )
+    # ax_pt.set_xlabel("k (Number of Top Jets Considered)")
+    # ax_pt.set_ylabel(f"Probability of Finding at least {n_eff} b-jets")
+    # ax_pt.set_title(
+    #     f"Probability of Finding at least {n_eff} b-jets vs. Top k Jets (pT ordered)"
+    # )
+    # ax_pt.grid(True, linestyle="--", alpha=0.6)
+    # ax_pt.legend()
+    # save_fig(fig_eff_pt, "top_n_eff_pt_ordering")
+    # plt.close(fig_eff_pt)
+
+    # fig_eff_btag, ax_btag = plt.subplots(figsize=(10, 6))
+    # ax_btag.step(
+    #     range_k,
+    #     more_than_n_eff_btag_part,
+    #     where="mid",
+    #     label="ParT BTag",
+    #     color="purple",
+    # )
+    # ax_btag.set_xlabel("k (Number of Top Jets Considered)")
+    # ax_btag.set_ylabel(f"Probability of Finding at least {n_eff} b-jets")
+    # ax_btag.set_title(
+    #     f"Probability of Finding at least {n_eff} b-jets vs. Top k Jets (BTag ordered)"
+    # )
+    # ax_btag.grid(True, linestyle="--", alpha=0.6)
+    # ax_btag.legend()
+    # save_fig(fig_eff_btag, "top_n_eff_btag_ordering")
+    # plt.close(fig_eff_btag)
+
+    # # ── Cell 24: Di-Higgs mass distribution plots ────────────────────
+    # res = part_dihiggs_result
+    # label = res["label"]
+    # color_dh = "purple"
+    # qcd_weights = res.get("qcd_weights", np.ones(res["n_qcd"]))
+
+    # sig_window_h = (90, 160)
+    # sig_window_hh = (250, 550)
+    # R_HH_CUT = 55.0
+
+    # # 1. Signal vs QCD: 1x3 overlay
+    # fig, axes = plt.subplots(1, 3, figsize=(24, 7))
+    # bins_h = np.linspace(0, 300, 61)
+    # bins_hh = np.linspace(200, 800, 61)
+
+    # ax = axes[0]
+    # if res["n_signal"] > 0:
+    #     ax.hist(
+    #         ak.to_numpy(res["sig_lead"].mass),
+    #         bins=bins_h,
+    #         histtype="stepfilled",
+    #         alpha=0.3,
+    #         color=color_dh,
+    #         label=f'Signal ({res["n_signal"]})',
+    #         density=True,
+    #     )
+    #     ax.hist(
+    #         ak.to_numpy(res["sig_lead"].mass),
+    #         bins=bins_h,
+    #         histtype="step",
+    #         linewidth=2,
+    #         color=color_dh,
+    #         density=True,
+    #     )
+    # if res["n_qcd"] > 0:
+    #     ax.hist(
+    #         ak.to_numpy(res["qcd_lead"].mass),
+    #         bins=bins_h,
+    #         histtype="step",
+    #         linewidth=2,
+    #         color="grey",
+    #         linestyle="--",
+    #         label=f'QCD bkg ({res["n_qcd"]})',
+    #         density=True,
+    #     )
+    # ax.axvline(125, color="green", linestyle=":", linewidth=1.5)
+    # ax.axvspan(*sig_window_h, alpha=0.05, color="green")
+    # ax.set_xlabel("Leading $m_H$ [GeV]")
+    # ax.set_ylabel("Events / 5 GeV")
+    # ax.set_title(f"{label} — Leading Higgs")
+    # ax.legend(fontsize=10)
+
+    # ax = axes[1]
+    # if res["n_signal"] > 0:
+    #     ax.hist(
+    #         ak.to_numpy(res["sig_sub"].mass),
+    #         bins=bins_h,
+    #         histtype="stepfilled",
+    #         alpha=0.3,
+    #         color=color_dh,
+    #         label="Signal",
+    #         density=True,
+    #     )
+    #     ax.hist(
+    #         ak.to_numpy(res["sig_sub"].mass),
+    #         bins=bins_h,
+    #         histtype="step",
+    #         linewidth=2,
+    #         color=color_dh,
+    #         density=True,
+    #     )
+    # if res["n_qcd"] > 0:
+    #     ax.hist(
+    #         ak.to_numpy(res["qcd_sub"].mass),
+    #         bins=bins_h,
+    #         histtype="step",
+    #         linewidth=2,
+    #         color="grey",
+    #         linestyle="--",
+    #         label="QCD bkg",
+    #         density=True,
+    #     )
+    # ax.axvline(125, color="green", linestyle=":", linewidth=1.5)
+    # ax.axvspan(*sig_window_h, alpha=0.05, color="green")
+    # ax.set_xlabel("Subleading $m_H$ [GeV]")
+    # ax.set_ylabel("Events / 5 GeV")
+    # ax.set_title(f"{label} — Subleading Higgs")
+    # ax.legend(fontsize=10)
+
+    # ax = axes[2]
+    # if res["n_signal"] > 0:
+    #     ax.hist(
+    #         ak.to_numpy(res["sig_hh"].mass),
+    #         bins=bins_hh,
+    #         histtype="stepfilled",
+    #         alpha=0.3,
+    #         color=color_dh,
+    #         label="Signal",
+    #         density=True,
+    #     )
+    #     ax.hist(
+    #         ak.to_numpy(res["sig_hh"].mass),
+    #         bins=bins_hh,
+    #         histtype="step",
+    #         linewidth=2,
+    #         color=color_dh,
+    #         density=True,
+    #     )
+    # if res["n_qcd"] > 0:
+    #     ax.hist(
+    #         ak.to_numpy(res["qcd_hh"].mass),
+    #         bins=bins_hh,
+    #         histtype="step",
+    #         linewidth=2,
+    #         color="grey",
+    #         linestyle="--",
+    #         label="QCD bkg",
+    #         density=True,
+    #     )
+    # ax.axvspan(*sig_window_hh, alpha=0.05, color="green")
+    # ax.set_xlabel("$m_{HH}$ [GeV]")
+    # ax.set_ylabel("Events / 10 GeV")
+    # ax.set_title(f"{label} — $m_{{HH}}$")
+    # ax.legend(fontsize=10)
+
+    # reg_tag = (
+    #     "pT-corrected"
+    #     if res["has_regression"] and apply_pt_correction
+    #     else "uncorrected pT"
+    # )
+    # fig.suptitle(f"Di-Higgs Reconstruction — {label} ({reg_tag})", fontsize=16, y=1.01)
+    # plt.tight_layout()
+    # save_fig(fig, f"dihiggs_mass_1d_{WP_SELECTION}")
+    # plt.close(fig)
+
+    # # 2. 2D mH1 vs mH2
+
+    # bins_2d = np.linspace(0, 300, 61)
+    # fig, axes = plt.subplots(1, 2, figsize=(20, 8))
+    # for ax_idx, (category, lead_key, sub_key, n_events) in enumerate(
+    #     [
+    #         ("Signal", "sig_lead", "sig_sub", res["n_signal"]),
+    #         ("QCD Background", "qcd_lead", "qcd_sub", res["n_qcd"]),
+    #     ]
+    # ):
+    #     ax = axes[ax_idx]
+    #     if n_events > 0:
+    #         lead_mass = ak.to_numpy(res[lead_key].mass)
+    #         sub_mass = ak.to_numpy(res[sub_key].mass)
+    #         r_hh_vals = R_hh_func(lead_mass, sub_mass)
+    #         sel = r_hh_vals < 550.0
+    #         h = ax.hist2d(
+    #             lead_mass[sel], sub_mass[sel], bins=[bins_2d, bins_2d], cmap="viridis"
+    #         )
+    #         ax.axvline(
+    #             125, color="red", linestyle="--", linewidth=1.5, label="$m_H$ = 125 GeV"
+    #         )
+    #         ax.axhline(120, color="red", linestyle="--", linewidth=1.5)
+    #         ellipse = Ellipse(
+    #             xy=(125, 120),
+    #             width=110,
+    #             height=96,
+    #             angle=0,
+    #             edgecolor="yellow",
+    #             facecolor="none",
+    #             linestyle="--",
+    #             linewidth=2,
+    #             label="$R_{HH}$ = 55 GeV",
+    #         )
+    #         ax.add_patch(ellipse)
+    #         n_sel = int(np.sum(sel))
+    #         ax.set_title(
+    #             f"{label} — {category}\n({n_sel} events inside $R_{{HH}}$ / {n_events} total)"
+    #         )
+    #         fig.colorbar(h[3], ax=ax, label="Events")
+    #     else:
+    #         ax.text(
+    #             0.5,
+    #             0.5,
+    #             f"No {category.lower()} events",
+    #             ha="center",
+    #             va="center",
+    #             transform=ax.transAxes,
+    #             fontsize=14,
+    #         )
+    #         ax.set_title(f"{label} — {category}")
+    #     ax.set_xlabel("Leading Higgs Mass [GeV]")
+    #     ax.set_ylabel("Subleading Higgs Mass [GeV]")
+    #     ax.legend(loc="upper right", fontsize=10)
+
+    # fig.suptitle(
+    #     f"2D $m_{{H1}}$ vs $m_{{H2}}$ — {label} ({reg_tag})", fontsize=16, y=1.02
+    # )
+    # plt.tight_layout()
+    # save_fig(fig, f"dihiggs_mass_2d_{WP_SELECTION}")
+    # plt.close(fig)
+
+    # # 3. Significance summary
+    # print(f"\n{'='*70}")
+    # print(
+    #     f"{'Tagger':<30} {'S':>6} {'B (wtd)':>10} {'S/√(S+B)':>10}  |  {'S (window)':>10} {'B (window)':>12} {'S/√(S+B)':>10}"
+    # )
+    # print(
+    #     f"{'':30} {'(all)':>6} {'(all)':>10} {'(all)':>10}  |  {str(sig_window_hh):>10} {str(sig_window_hh):>12} {'(window)':>10}"
+    # )
+    # print("-" * 90)
+    # if res["n_signal"] > 0 and res["n_qcd"] > 0:
+    #     sigma_to_ngen = res.get("sigma_to_ngen", {})
+    #     sig_mh1 = ak.to_numpy(res["sig_lead"].mass)
+    #     sig_mh2 = ak.to_numpy(res["sig_sub"].mass)
+    #     bkg_mh1 = ak.to_numpy(res["qcd_lead"].mass)
+    #     bkg_mh2 = ak.to_numpy(res["qcd_sub"].mass)
+
+    #     # mHH window significance via luminosity-scaled wrapper
+    #     result_mhh = compute_significance_at_luminosity(
+    #         sig_mh1,
+    #         sig_mh2,
+    #         bkg_mh1,
+    #         bkg_mh2,
+    #         bkg_raw_weights=qcd_weights,
+    #         sigma_to_ngen=sigma_to_ngen,
+    #         n_gen_signal=N_GEN_SIGNAL,
+    #         luminosity_fb=LUMINOSITY_FB,
+    #         signal_xsec_pb=SIGNAL_XSEC_PB,
+    #         region="circular",
+    #         rect_window=sig_window_hh,
+    #     )
+    #     S_win = result_mhh["S"]
+    #     B_win = result_mhh["B"]
+    #     signif_win = result_mhh["significance"]
+
+    #     _sw = signal_weight(len(sig_mh1), LUMINOSITY_FB, SIGNAL_XSEC_PB, N_GEN_SIGNAL)
+    #     _bw = scale_qcd_weights_raw(qcd_weights, sigma_to_ngen, LUMINOSITY_FB)
+    #     S_all = float(np.sum(_sw))
+    #     B_all = float(np.sum(_bw))
+    #     signif_all = S_all / np.sqrt(S_all + B_all) if (S_all + B_all) > 0 else 0
+    #     print(
+    #         f"{label:<30} {S_all:>6.0f} {B_all:>10.1e} {signif_all:>10.4f}  |  {S_win:>10.0f} {B_win:>12.1e} {signif_win:>10.4f}"
+    #     )
+    #     print(
+    #         f"\n  Note: S and B are luminosity-scaled expected event counts at {LUMINOSITY_FB:.0f} fb^-1."
+    #     )
+    #     print(f"  Unweighted QCD events: {res['n_qcd']}")
+    # else:
+    #     print(f"{label:<30}  Insufficient events for significance")
+
+    # # 4. R_HH distribution (signal vs weighted QCD)
+    # fig, ax = plt.subplots(figsize=(10, 7))
+    # rhh_bins = np.linspace(0, 300, 61)
+
+    # if res["n_signal"] > 0:
+    #     sig_rhh = R_hh_func(
+    #         ak.to_numpy(res["sig_lead"].mass),
+    #         ak.to_numpy(res["sig_sub"].mass),
+    #     )
+    #     ax.hist(
+    #         sig_rhh,
+    #         bins=rhh_bins,
+    #         histtype="stepfilled",
+    #         alpha=0.30,
+    #         color=color_dh,
+    #         label=f'Signal ({res["n_signal"]})',
+    #     )
+    #     ax.hist(sig_rhh, bins=rhh_bins, histtype="step", linewidth=2, color=color_dh)
+
+    # if res["n_qcd"] > 0:
+    #     bkg_rhh = R_hh_func(
+    #         ak.to_numpy(res["qcd_lead"].mass),
+    #         ak.to_numpy(res["qcd_sub"].mass),
+    #     )
+    #     ax.hist(
+    #         bkg_rhh,
+    #         bins=rhh_bins,
+    #         histtype="step",
+    #         linewidth=2,
+    #         color="grey",
+    #         linestyle="--",
+    #         label=f'QCD ({res["n_qcd"]} events, weighted)',
+    #         weights=qcd_weights,
+    #     )
+
+    # ax.axvline(
+    #     R_HH_CUT,
+    #     color="red",
+    #     linestyle=":",
+    #     linewidth=2,
+    #     label=f"$R_{{HH}}$ cut = {R_HH_CUT:.0f} GeV",
+    # )
+    # ax.axvspan(0, R_HH_CUT, alpha=0.06, color="red")
+    # ax.set_xlabel("$R_{HH}$ [GeV]")
+    # ax.set_ylabel("Events / 5 GeV (QCD weighted)")
+    # ax.set_title(f"{label} - $R_{{HH}}$ distribution")
+    # ax.set_yscale("log")
+    # ax.grid(True, alpha=0.3, which="both")
+    # ax.legend(fontsize=10)
+    # plt.tight_layout()
+    # save_fig(fig, f"rhh_distribution_{WP_SELECTION}")
+    # plt.close(fig)
+
+    # # 5. 2D mH1 vs mH2 with R_HH ellipse
+    # bins_2d_rhh = np.linspace(0, 300, 61)
+    # fig, axes = plt.subplots(1, 2, figsize=(20, 8))
+
+    # for ax_idx, (category, lead_key, sub_key, n_events, w) in enumerate(
+    #     [
+    #         ("Signal", "sig_lead", "sig_sub", res["n_signal"], None),
+    #         ("Simulated QCD", "qcd_lead", "qcd_sub", res["n_qcd"], qcd_weights),
+    #     ]
+    # ):
+    #     ax = axes[ax_idx]
+
+    #     if n_events > 0:
+    #         lead_mass = ak.to_numpy(res[lead_key].mass)
+    #         sub_mass = ak.to_numpy(res[sub_key].mass)
+    #         r_hh_vals = R_hh_func(lead_mass, sub_mass)
+    #         sel = r_hh_vals < R_HH_CUT
+
+    #         h = ax.hist2d(
+    #             lead_mass,
+    #             sub_mass,
+    #             bins=[bins_2d_rhh, bins_2d_rhh],
+    #             cmap="viridis",
+    #             weights=w,
+    #         )
+
+    #         ax.axvline(
+    #             125,
+    #             color="red",
+    #             linestyle="--",
+    #             linewidth=1.5,
+    #             label="$m_{H1}=125$ GeV",
+    #         )
+    #         ax.axhline(120, color="red", linestyle="--", linewidth=1.5)
+
+    #         ellipse = Ellipse(
+    #             xy=(125, 120),
+    #             width=2 * R_HH_CUT,
+    #             height=2 * R_HH_CUT,
+    #             angle=0,
+    #             edgecolor="yellow",
+    #             facecolor="none",
+    #             linestyle="--",
+    #             linewidth=2,
+    #             label=f"$R_{{HH}}$ = {R_HH_CUT:.0f} GeV",
+    #         )
+    #         ax.add_patch(ellipse)
+
+    #         n_sel = int(np.sum(sel))
+    #         if w is not None:
+    #             w_sel = float(np.sum(w[sel]))
+    #             w_tot = float(np.sum(w))
+    #             ax.set_title(
+    #                 f"{label} - {category}\n"
+    #                 f"({n_sel}/{n_events} inside $R_{{HH}}$, weighted: {w_sel:.1e}/{w_tot:.1e})"
+    #             )
+    #         else:
+    #             ax.set_title(
+    #                 f"{label} - {category}\n({n_sel}/{n_events} inside $R_{{HH}}$)"
+    #             )
+
+    #         fig.colorbar(
+    #             h[3],
+    #             ax=ax,
+    #             label="Weighted Events" if w is not None else "Events",
+    #         )
+    #     else:
+    #         ax.text(
+    #             0.5,
+    #             0.5,
+    #             f"No {category.lower()} events",
+    #             ha="center",
+    #             va="center",
+    #             transform=ax.transAxes,
+    #             fontsize=14,
+    #         )
+    #         ax.set_title(f"{label} - {category}")
+
+    #     ax.set_xlabel("Leading Higgs Mass [GeV]")
+    #     ax.set_ylabel("Subleading Higgs Mass [GeV]")
+    #     ax.legend(loc="upper right", fontsize=10)
+
+    # fig.suptitle(
+    #     f"2D $m_{{H1}}$ vs $m_{{H2}}$ - {label} ({reg_tag}), $R_{{HH}}<{R_HH_CUT:.0f}$",
+    #     fontsize=16,
+    #     y=1.02,
+    # )
+    # plt.tight_layout()
+    # save_fig(fig, f"dihiggs_mass_2d_rhh_{WP_SELECTION}")
+    # plt.close(fig)
+
+    # print("=" * 90)
+    # print(f"\nWorking point: {WP_SELECTION} (threshold={PART_BTAG_THRESHOLD:.4f})")
+    # print(
+    #     f"pT regression: {'applied' if res['has_regression'] and apply_pt_correction else 'not applied'}"
+    # )
+    # print(f"Collection: {res['collection_key']}")
+    # print(f"\nAll di-Higgs plots saved to: {plot_dir}")
+
+    # # ============================================================
+    # # CACHE: Save paired di-Higgs candidate data for offline plotting
+    # # Run after the WP-sweep cell (cell 35). Saves both:
+    # #   - dh_raw arrays (pre-WP): lets you re-run the WP sweep offline
+    # #   - part_dihiggs_result arrays (WP-filtered): ready for direct plotting
+    # #
+    # # Output: plot_dir/dihiggs_result_{collection_key}_{WP_SELECTION}.npz
+    # #
+    # # To reload in another notebook:
+    # #   c = np.load(path, allow_pickle=False)
+    # #   sigma_to_ngen = dict(zip(c["sigma_to_ngen_keys"], c["sigma_to_ngen_vals"]))
+    # #   # Raw dh_raw-style dict:
+    # #   dh_raw_loaded = {k: c[k] for k in ["sig_min_btag","sig_lead_m","sig_sub_m",
+    # #       "sig_hh_m","sig_is_pure","sig_pair_ok","sig_pair_swap",
+    # #       "qcd_min_btag","qcd_lead_m","qcd_sub_m","qcd_hh_m"]}
+    # #   dh_raw_loaded["qcd_weights"] = c["qcd_weights_raw"]
+    # #   dh_raw_loaded["sigma_to_ngen"] = sigma_to_ngen
+    # #   # WP-filtered numpy arrays (no awkward needed):
+    # #   sig_lead_m = c["sig_lead_m_wp"]; sig_sub_m = c["sig_sub_m_wp"]
+    # #   qcd_lead_m = c["qcd_lead_m_wp"]; qcd_weights_raw = c["qcd_weights_wp"]
+    # # ============================================================
+    # _res = part_dihiggs_result
+    # _cache_fname = f"dihiggs_result_{collection_key}_{WP_SELECTION}.npz"
+    # _cache_path = os.path.join(plot_dir, _cache_fname)
+    # print(f"Saving di-Higgs cache → {_cache_path}")
+
+    # _s2n_keys = np.array(list(dh_raw["sigma_to_ngen"].keys()), dtype=np.float64)
+    # _s2n_vals = np.array(list(dh_raw["sigma_to_ngen"].values()), dtype=np.float64)
+
+    # np.savez_compressed(
+    #     _cache_path,
+    #     # ── Metadata ──────────────────────────────────────────────────────────────
+    #     collection_key=np.array(collection_key),
+    #     wp_selection=np.array(WP_SELECTION),
+    #     threshold=np.array(PART_BTAG_THRESHOLD),
+    #     has_regression=np.array(dh_raw["has_reg"]),
+    #     apply_pt_correction=np.array(apply_pt_correction),
+    #     model_label=np.array(config_part.get("exp_name", "trained_model")),
+    #     luminosity_fb=np.array(LUMINOSITY_FB),
+    #     signal_xsec_pb=np.array(SIGNAL_XSEC_PB),
+    #     n_gen_signal=np.array(N_GEN_SIGNAL),
+    #     r_hh_cut=np.array(R_HH_CUT),
+    #     n_sig_events_loaded=np.array(dh_raw["n_sig_events_loaded"]),
+    #     n_qcd_scanned=np.array(dh_raw["n_qcd_scanned"]),
+    #     # sigma_to_ngen serialised as parallel arrays (no pickle needed)
+    #     sigma_to_ngen_keys=_s2n_keys,
+    #     sigma_to_ngen_vals=_s2n_vals,
+    #     pair_eff=np.array(_res["pair_eff"]),
+    #     eff_swapped=np.array(_res["eff_swapped"]),
+    #     # ── Raw per-event arrays from dh_raw (pre-WP) — needed for WP sweep ──────
+    #     sig_min_btag=dh_raw["sig_min_btag"],
+    #     sig_lead_m=dh_raw["sig_lead_m"],
+    #     sig_sub_m=dh_raw["sig_sub_m"],
+    #     sig_hh_m=dh_raw["sig_hh_m"],
+    #     sig_is_pure=dh_raw["sig_is_pure"],
+    #     sig_pair_ok=dh_raw["sig_pair_ok"],
+    #     sig_pair_swap=dh_raw["sig_pair_swap"],
+    #     qcd_min_btag=dh_raw["qcd_min_btag"],
+    #     qcd_lead_m=dh_raw["qcd_lead_m"],
+    #     qcd_sub_m=dh_raw["qcd_sub_m"],
+    #     qcd_hh_m=dh_raw["qcd_hh_m"],
+    #     qcd_weights_raw=dh_raw["qcd_weights"],  # raw σ_bin (Convention C)
+    #     # ── WP-filtered arrays from part_dihiggs_result — ready for plotting ──────
+    #     sig_lead_m_wp=ak.to_numpy(_res["sig_lead"].mass),
+    #     sig_sub_m_wp=ak.to_numpy(_res["sig_sub"].mass),
+    #     sig_hh_m_wp=ak.to_numpy(_res["sig_hh"].mass),
+    #     qcd_lead_m_wp=ak.to_numpy(_res["qcd_lead"].mass),
+    #     qcd_sub_m_wp=ak.to_numpy(_res["qcd_sub"].mass),
+    #     qcd_hh_m_wp=ak.to_numpy(_res["qcd_hh"].mass),
+    #     qcd_weights_wp=_res["qcd_weights"],  # raw σ_bin filtered at WP
+    #     n_signal=np.array(_res["n_signal"]),
+    #     n_qcd=np.array(_res["n_qcd"]),
+    #     n_total=np.array(_res["n_total"]),
+    # )
+
+    # print(f"Saved: {_cache_path}")
+    # print(
+    #     f"  Raw signal events  : {len(dh_raw['sig_min_btag']):,}  (pre-WP, all ≥4 jets)"
+    # )
+    # print(
+    #     f"  Raw QCD events     : {len(dh_raw['qcd_min_btag']):,}  (pre-WP, all ≥4 jets)"
+    # )
+    # print(
+    #     f"  Signal @ WP        : {_res['n_signal']:,}  (pure, threshold={PART_BTAG_THRESHOLD:.4f})"
+    # )
+    # print(f"  QCD @ WP           : {_res['n_qcd']:,}")
+    # print(
+    #     f"  Pair efficiency    : {_res['pair_eff']:.2%}  (+swap {_res['eff_swapped']:.2%})"
+    # )
 
     # ── Cell 25: Attention map visualization & pairwise feature analysis ──
     print("=" * 60)
@@ -5435,7 +5437,7 @@ def main():
         "d_{xy}",
         "z_0",
         "Charge",
-        "log(pT_rel)",
+        "log(pT_{rel})",
         "dη",
         "dφ",
         "PUPPI weight",
@@ -5965,7 +5967,7 @@ def main():
 
         n_particle_types = min(5, perm_x.shape[2] - 12)
         ptype_names = globals().get(
-            "PARTICLE_TYPE_NAMES", [f"Type {i}" for i in range(n_particle_types)]
+            "PARTICLE_TYPE_NAMES", ["Charged Hadron", "Electron", "Neutral Hadron", "Photon", "Muon"]
         )
         ptype_colors = globals().get(
             "PARTICLE_TYPE_COLORS",
@@ -6658,6 +6660,1041 @@ def main():
     print("Model behavior analysis complete!")
     print(f"{'='*70}")
 
+
+    # ============================================================
+    # Feature-importance analysis with bootstrap uncertainty
+    # Runs N_RUNS independent random jet subsets; reports mean ± std.
+    # ============================================================
+    
+    # ----------------------------
+    # Config
+    # ----------------------------
+    SEED = 42
+    N_RUNS = 10  # independent random subsets → gives uncertainty on all metrics
+    N_SUBSET_TARGET = 5000
+    N_PERMUTATIONS = 5
+    N_GRAD_SAMPLES = 100
+    N_PLOT_FEATURES_MAX = 12
+    N_KS_SUBSAMPLE = 10000
+    
+    rng = np.random.default_rng(SEED)
+    
+    # ----------------------------
+    # Feature names
+    # ----------------------------
+    input_feature_names = [
+        "Mass",
+        "p_T",
+        r"\eta",
+        r"\phi",
+        "d_{xy}",
+        "z_0",
+        "Charge",
+        r"log(pT_{rel})",
+        r"d\eta",
+        r"d\phi",
+        "PUPPI weight",
+        "log(dR)",
+    ]
+    n_total_features = int(all_constituents.shape[2])
+    if n_total_features > 12:
+        for i in range(12, n_total_features):
+            input_feature_names.append(f"ParticleID_{i-11}")
+    
+    # ----------------------------
+    # Build full analysis pool (once)
+    # ----------------------------
+    labels_full = np.asarray(all_labels).astype(int).reshape(-1)
+    
+    use_post_cut = (
+        "roc_weights" in globals()
+        and "all_labels_after_cuts" in globals()
+        and "val_cuts_mask" in globals()
+        and len(labels_full) == len(val_cuts_mask)
+    )
+    
+    if use_post_cut:
+        cut_mask_np = (
+            val_cuts_mask.detach().cpu().numpy().astype(bool)
+            if isinstance(val_cuts_mask, torch.Tensor)
+            else np.asarray(val_cuts_mask).astype(bool)
+        )
+        x_full = all_constituents[torch.from_numpy(cut_mask_np)]
+        y_full = np.asarray(all_labels_after_cuts).astype(int).reshape(-1)
+        w_full = np.asarray(roc_weights).reshape(-1).astype(np.float64)
+        print("Using post-cut sample with roc_weights (ROC-consistent)")
+    else:
+        x_full = all_constituents
+        y_full = labels_full
+        w_full = np.asarray(all_qcd_weights_val).reshape(-1).astype(np.float64)
+        print("Using full validation sample with all_qcd_weights_val")
+    
+    if len(x_full) != len(y_full) or len(w_full) != len(y_full):
+        raise ValueError(
+            f"Length mismatch: x={len(x_full)}, y={len(y_full)}, w={len(w_full)}"
+        )
+    
+    # Fixed subset sizes (same N each run, different jets)
+    sig_idx = np.where(y_full == 1)[0]
+    bkg_idx = np.where(y_full == 0)[0]
+    if len(sig_idx) == 0 or len(bkg_idx) == 0:
+        raise RuntimeError("Need both classes in analysis sample.")
+    
+    n_subset = min(N_SUBSET_TARGET, len(y_full))
+    n_sig = int(round(n_subset * len(sig_idx) / len(y_full)))
+    n_sig = max(1, min(n_sig, len(sig_idx), n_subset - 1))
+    n_bkg = min(n_subset - n_sig, len(bkg_idx))
+    if n_bkg < 1:
+        n_bkg = 1
+        n_sig = min(n_subset - 1, len(sig_idx))
+    
+    n_features = min(len(input_feature_names), int(x_full.shape[2]))
+    n_plot = min(N_PLOT_FEATURES_MAX, n_features)
+    names = input_feature_names[:n_plot]
+    
+    print(
+        f"n_features={n_features}, subset/run={n_sig+n_bkg} (sig={n_sig}, bkg={n_bkg}), N_RUNS={N_RUNS}"
+    )
+    
+    # ----------------------------
+    # Storage for all runs
+    # ----------------------------
+    all_run_grad = np.zeros((N_RUNS, n_features))
+    all_run_grad_sig = np.zeros((N_RUNS, n_features))
+    all_run_grad_bkg = np.zeros((N_RUNS, n_features))
+    all_run_perm = np.zeros((N_RUNS, n_features))
+    all_run_abl = np.zeros((N_RUNS, n_features))
+    all_run_fisher = np.zeros((N_RUNS, n_features))
+    all_run_ks = np.zeros((N_RUNS, n_features))
+    all_run_base = np.zeros(N_RUNS)
+    all_run_combined = np.zeros((N_RUNS, n_plot))
+    
+    
+    def _safe_norm(v):
+        s = float(np.sum(v))
+        return v / s if s > 0 else v
+    
+    
+    def _norm01(a):
+        a = np.asarray(a, dtype=float)
+        lo, hi = np.min(a), np.max(a)
+        return (a - lo) / (hi - lo) if hi > lo else np.zeros_like(a)
+    
+    
+    # ----------------------------
+    # Bootstrap loop
+    # ----------------------------
+    model.eval()
+    
+    # keep last-run tensors for Plot H (correlation)
+    perm_x_last = None
+    perm_mask_last = None
+    perm_labels_last = None
+    baseline_scores_last = None
+    
+    for run_idx in range(N_RUNS):
+        print(f"  Run {run_idx+1}/{N_RUNS}", end="  ", flush=True)
+    
+        # ── New random subset ─────────────────────────────────────────
+        subset_idx = np.concatenate(
+            [
+                rng.choice(sig_idx, size=n_sig, replace=False),
+                rng.choice(bkg_idx, size=n_bkg, replace=False),
+            ]
+        )
+        rng.shuffle(subset_idx)
+        subset_t = torch.from_numpy(subset_idx).long()
+        perm_x = x_full[subset_t].float().to(device)
+        perm_labels = y_full[subset_idx]
+        perm_weights = w_full[subset_idx].astype(np.float64)
+        perm_mask = perm_x[:, :, 1] > 0
+    
+        sig_rows = np.where(perm_labels == 1)[0]
+        bkg_rows = np.where(perm_labels == 0)[0]
+        sig_rows_t = torch.as_tensor(sig_rows, dtype=torch.long, device=device)
+        bkg_rows_t = torch.as_tensor(bkg_rows, dtype=torch.long, device=device)
+    
+        # ── Baseline AUC ──────────────────────────────────────────────
+        with torch.no_grad():
+            baseline_scores = (
+                torch.sigmoid(model(perm_x, particle_mask=perm_mask)["classification"])
+                .squeeze()
+                .detach()
+                .cpu()
+                .numpy()
+            )
+        baseline_auc = roc_auc_score(
+            perm_labels, baseline_scores, sample_weight=perm_weights
+        )
+        all_run_base[run_idx] = baseline_auc
+        print(f"AUC={baseline_auc:.4f}", end="  |  ", flush=True)
+    
+        # ── 1) Gradient importance ─────────────────────────────────────
+        n_grad = min(N_GRAD_SAMPLES, len(perm_x))
+        grad_x = perm_x[:n_grad].clone().detach().requires_grad_(True)
+        grad_lbl = perm_labels[:n_grad]
+        grad_mask = grad_x[:, :, 1] > 0
+        grad_x.grad = None
+        torch.sigmoid(
+            model(grad_x, particle_mask=grad_mask)["classification"]
+        ).sum().backward()
+        grads = grad_x.grad.detach().cpu().numpy()
+        mask_np = grad_mask.detach().cpu().numpy()
+        del grad_x
+    
+        g_all = np.zeros(n_features)
+        g_sig = np.zeros(n_features)
+        g_bkg = np.zeros(n_features)
+        for f in range(n_features):
+            av, sv, bv = [], [], []
+            for i in range(n_grad):
+                valid_n = int(mask_np[i].sum())
+                if valid_n == 0:
+                    continue
+                g = np.abs(grads[i, :valid_n, f])
+                av.extend(g.tolist())
+                (sv if grad_lbl[i] == 1 else bv).extend(g.tolist())
+            g_all[f] = np.mean(av) if av else 0.0
+            g_sig[f] = np.mean(sv) if sv else 0.0
+            g_bkg[f] = np.mean(bv) if bv else 0.0
+        del grads, mask_np
+        all_run_grad[run_idx] = _safe_norm(g_all)
+        all_run_grad_sig[run_idx] = _safe_norm(g_sig)
+        all_run_grad_bkg[run_idx] = _safe_norm(g_bkg)
+        print("grad✓", end="  ", flush=True)
+    
+        # ── 2) Permutation importance (class-conditional) ──────────────
+        perm_imp = np.zeros(n_features)
+        for f in range(n_features):
+            drops = []
+            for _ in range(N_PERMUTATIONS):
+                x_p = perm_x.clone()
+                if sig_rows_t.numel() > 1:
+                    ps = sig_rows_t[torch.randperm(sig_rows_t.numel(), device=device)]
+                    x_p[sig_rows_t, :, f] = perm_x[ps, :, f]
+                if bkg_rows_t.numel() > 1:
+                    pb = bkg_rows_t[torch.randperm(bkg_rows_t.numel(), device=device)]
+                    x_p[bkg_rows_t, :, f] = perm_x[pb, :, f]
+                em = perm_mask if f != 1 else (x_p[:, :, 1] > 0)
+                with torch.no_grad():
+                    s = (
+                        torch.sigmoid(model(x_p, particle_mask=em)["classification"])
+                        .squeeze()
+                        .detach()
+                        .cpu()
+                        .numpy()
+                    )
+                drops.append(
+                    baseline_auc - roc_auc_score(perm_labels, s, sample_weight=perm_weights)
+                )
+            perm_imp[f] = float(np.mean(drops))
+        all_run_perm[run_idx] = perm_imp
+        print("perm✓", end="  ", flush=True)
+    
+        # ── 3) Ablation importance ─────────────────────────────────────
+        abl_imp = np.zeros(n_features)
+        for f in range(n_features):
+            x_z = perm_x.clone()
+            x_z[:, :, f] = 0.0
+            em = perm_mask if f != 1 else (x_z[:, :, 1] > 0)
+            with torch.no_grad():
+                s = (
+                    torch.sigmoid(model(x_z, particle_mask=em)["classification"])
+                    .squeeze()
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )
+            abl_imp[f] = baseline_auc - roc_auc_score(
+                perm_labels, s, sample_weight=perm_weights
+            )
+        all_run_abl[run_idx] = abl_imp
+        print("abl✓", end="  ", flush=True)
+    
+        # ── 4) Fisher + KS ────────────────────────────────────────────
+        sx = perm_x[:, :, :n_features].detach().cpu().numpy()
+        sm = perm_mask.detach().cpu().numpy()
+        fish = np.zeros(n_features)
+        ks = np.zeros(n_features)
+        for f in range(n_features):
+            sv = sx[perm_labels == 1, :, f][sm[perm_labels == 1]].reshape(-1)
+            bv = sx[perm_labels == 0, :, f][sm[perm_labels == 0]].reshape(-1)
+            if len(sv) < 2 or len(bv) < 2:
+                continue
+            fish[f] = (np.mean(sv) - np.mean(bv)) ** 2 / (np.var(sv) + np.var(bv) + 1e-8)
+            ns = min(N_KS_SUBSAMPLE, len(sv), len(bv))
+            ks[f] = ks_2samp(
+                rng.choice(sv, size=ns, replace=False) if len(sv) > ns else sv,
+                rng.choice(bv, size=ns, replace=False) if len(bv) > ns else bv,
+            ).statistic
+        all_run_fisher[run_idx] = fish
+        all_run_ks[run_idx] = ks
+    
+        # ── Combined score for this run ────────────────────────────────
+        all_run_combined[run_idx] = (
+            _norm01(all_run_grad[run_idx, :n_plot])
+            + _norm01(np.maximum(perm_imp[:n_plot], 0.0))
+            + _norm01(np.maximum(abl_imp[:n_plot], 0.0))
+            + _norm01(fish[:n_plot])
+            + _norm01(ks[:n_plot])
+        ) / 5.0
+    
+        # Save last-run tensors for correlation plot
+        perm_x_last = perm_x.detach()
+        perm_mask_last = perm_mask.detach()
+        perm_labels_last = perm_labels
+        baseline_scores_last = baseline_scores
+        print("fisher/ks✓")
+    
+    # ----------------------------
+    # Aggregate across runs
+    # ----------------------------
+    grad_mean = np.mean(all_run_grad, 0)
+    grad_std = np.std(all_run_grad, 0)
+    grad_sig_m = np.mean(all_run_grad_sig, 0)
+    grad_sig_s = np.std(all_run_grad_sig, 0)
+    grad_bkg_m = np.mean(all_run_grad_bkg, 0)
+    grad_bkg_s = np.std(all_run_grad_bkg, 0)
+    perm_mean = np.mean(all_run_perm, 0)
+    perm_std = np.std(all_run_perm, 0)
+    abl_mean = np.mean(all_run_abl, 0)
+    abl_std = np.std(all_run_abl, 0)
+    fisher_mean = np.mean(all_run_fisher, 0)
+    fisher_std = np.std(all_run_fisher, 0)
+    ks_mean = np.mean(all_run_ks, 0)
+    ks_std = np.std(all_run_ks, 0)
+    combined_score = np.mean(all_run_combined, 0)
+    combined_std = np.std(all_run_combined, 0)
+    baseline_auc = float(np.mean(all_run_base))
+    baseline_std_val = float(np.std(all_run_base))
+    
+    print(f"\nBaseline AUC: {baseline_auc:.4f} ± {baseline_std_val:.4f}  ({N_RUNS} runs)")
+    
+    # Back-compat aliases
+    grad_importance = grad_mean
+    grad_importance_signal = grad_sig_m
+    grad_importance_background = grad_bkg_m
+    perm_importance = perm_mean
+    ablation_importance = abl_mean
+    fisher_scores = fisher_mean
+    ks_scores = ks_mean
+    
+    
+    # ----------------------------
+    # Plotting helpers
+    # ----------------------------
+    def _barh_err(means, stds, sorted_idx, color, xlabel, title, fname, axvline=False):
+        fig, ax = plt.subplots(figsize=(10, 6))
+        vals = means[sorted_idx]
+        errs = stds[sorted_idx]
+        bar_colors = color if isinstance(color, list) else [color] * n_plot
+        ax.barh(
+            np.arange(n_plot),
+            vals,
+            xerr=errs,
+            color=bar_colors,
+            alpha=0.85,
+            capsize=4,
+            error_kw={"elinewidth": 1.2, "capthick": 1.2},
+        )
+        ax.set_yticks(np.arange(n_plot))
+        ax.set_yticklabels([rf"${names[i]}$" for i in sorted_idx])
+        ax.set_xlabel(xlabel)
+        ax.set_title(title)
+        if axvline:
+            ax.axvline(0, color="black", linestyle="--", alpha=0.6)
+        ax.invert_yaxis()
+        ax.grid(axis="x", alpha=0.25)
+        plt.tight_layout()
+        plt.show()
+        save_fig(fig, fname)
+    
+    
+    x_pos = np.arange(n_plot)
+    
+    # Plot A: Gradient
+    _barh_err(
+        grad_mean[:n_plot],
+        grad_std[:n_plot],
+        np.argsort(grad_mean[:n_plot])[::-1],
+        "steelblue",
+        "Normalized Mean |Gradient|  (mean ± std)",
+        "Gradient-Based Importance",
+        "feature_importance_gradient",
+    )
+    
+    # Plot B: Permutation
+    idx = np.argsort(perm_mean[:n_plot])[::-1]
+    _barh_err(
+        perm_mean[:n_plot],
+        perm_std[:n_plot],
+        idx,
+        ["green" if perm_mean[:n_plot][i] > 0 else "red" for i in idx],
+        "AUC Drop When Permuted  (mean ± std across runs)",
+        "Permutation Importance",
+        "feature_importance_permutation",
+        axvline=True,
+    )
+    
+    # Plot C: Ablation
+    idx = np.argsort(abl_mean[:n_plot])[::-1]
+    _barh_err(
+        abl_mean[:n_plot],
+        abl_std[:n_plot],
+        idx,
+        ["green" if abl_mean[:n_plot][i] > 0 else "red" for i in idx],
+        "AUC Drop When Zeroed  (mean ± std across runs)",
+        "Feature Ablation Importance",
+        "feature_importance_ablation",
+        axvline=True,
+    )
+    
+    # Plot D: Fisher
+    _barh_err(
+        fisher_mean[:n_plot],
+        fisher_std[:n_plot],
+        np.argsort(fisher_mean[:n_plot])[::-1],
+        "darkorange",
+        "Fisher Discriminant Ratio  (mean ± std)",
+        "Statistical Separability (Fisher)",
+        "feature_importance_fisher",
+    )
+    
+    # Plot E: KS
+    _barh_err(
+        ks_mean[:n_plot],
+        ks_std[:n_plot],
+        np.argsort(ks_mean[:n_plot])[::-1],
+        "purple",
+        "KS Statistic  (mean ± std)",
+        "Statistical Separability (KS)",
+        "feature_importance_ks",
+    )
+    
+    # Plot F: Combined ranking
+    idx = np.argsort(combined_score)[::-1]
+    _barh_err(
+        combined_score,
+        combined_std,
+        idx,
+        "darkgreen",
+        "Combined Importance Score  (mean ± std)",
+        "Overall Feature Ranking",
+        "feature_importance_combined",
+    )
+    
+    # Plot G: Gradient signal vs background
+    fig, ax = plt.subplots(figsize=(12, 6))
+    bw = 0.38
+    ax.bar(
+        x_pos - bw / 2,
+        grad_sig_m[:n_plot],
+        bw,
+        yerr=grad_sig_s[:n_plot],
+        label="Signal",
+        color="blue",
+        alpha=0.75,
+        capsize=3,
+        error_kw={"elinewidth": 1.2},
+    )
+    ax.bar(
+        x_pos + bw / 2,
+        grad_bkg_m[:n_plot],
+        bw,
+        yerr=grad_bkg_s[:n_plot],
+        label="Background",
+        color="red",
+        alpha=0.75,
+        capsize=3,
+        error_kw={"elinewidth": 1.2},
+    )
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels([rf"${n}$" for n in names], rotation=45, ha="right")
+    ax.set_xlabel("Feature")
+    ax.set_ylabel("Normalized Mean |Gradient|  (mean ± std)")
+    ax.set_title("Gradient Importance: Signal vs Background")
+    ax.legend()
+    ax.grid(axis="y", alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+    save_fig(fig, "feature_importance_gradient_signal_vs_background_new")
+    
+    # Plot H: Feature correlation with model output (last run)
+    mean_features = np.zeros((len(perm_labels_last), n_plot), dtype=np.float64)
+    pm_np = perm_mask_last.cpu().numpy()
+    px_np = perm_x_last.cpu().numpy()
+    for i in range(len(perm_labels_last)):
+        valid = pm_np[i]
+        if np.any(valid):
+            mean_features[i] = px_np[i, valid, :n_plot].mean(axis=0)
+    corr_vals = np.array(
+        [
+            (
+                np.corrcoef(mean_features[:, f], baseline_scores_last)[0, 1]
+                if np.std(mean_features[:, f]) > 1e-12
+                and np.std(baseline_scores_last) > 1e-12
+                else 0.0
+            )
+            for f in range(n_plot)
+        ]
+    )
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.bar(
+        np.arange(n_plot),
+        corr_vals,
+        color=["blue" if c > 0 else "red" for c in corr_vals],
+        alpha=0.75,
+    )
+    ax.set_xticks(np.arange(n_plot))
+    ax.set_xticklabels([rf"${n}$" for n in names], rotation=45, ha="right")
+    ax.set_xlabel("Feature")
+    ax.set_ylabel("Pearson Correlation")
+    ax.set_title("Feature Correlation with Model Output  (last run)")
+    ax.axhline(0, color="black", linestyle="--", alpha=0.6)
+    ax.grid(axis="y", alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+    save_fig(fig, "feature_importance_correlation_new")
+    
+    # ----------------------------
+    # DXY diagnostics (uses all_constituents[:1000], not subset)
+    # ----------------------------
+    if "d_{xy}" in input_feature_names and input_feature_names.index("d_{xy}") < n_features:
+        dxy_idx = input_feature_names.index("d_{xy}")
+        n_legacy = min(1000, len(all_constituents))
+        x_legacy = all_constituents[:n_legacy].float().to(device)
+        m_legacy = x_legacy[:, :, 1] > 0
+        y_legacy = np.asarray(all_labels[:n_legacy]).astype(int).reshape(-1)
+        w_legacy = np.asarray(all_qcd_weights_val[:n_legacy]).reshape(-1).astype(np.float64)
+        with torch.no_grad():
+            s_leg = (
+                torch.sigmoid(model(x_legacy, particle_mask=m_legacy)["classification"])
+                .squeeze()
+                .detach()
+                .cpu()
+                .numpy()
+            )
+            x_lz = x_legacy.clone()
+            x_lz[:, :, dxy_idx] = 0.0
+            s_lz = (
+                torch.sigmoid(model(x_lz, particle_mask=m_legacy)["classification"])
+                .squeeze()
+                .detach()
+                .cpu()
+                .numpy()
+            )
+        auc_leg = roc_auc_score(y_legacy, s_leg, sample_weight=w_legacy)
+        auc_lz = roc_auc_score(y_legacy, s_lz, sample_weight=w_legacy)
+        print(f"\nDXY diagnostics (fixed first-{n_legacy} sample):")
+        print(
+            f"  baseline={auc_leg:.4f}  zero-d_xy={auc_lz:.4f}  drop={auc_leg-auc_lz:+.4f}"
+        )
+        print(
+            f"  Bootstrap ablation d_xy: {abl_mean[dxy_idx]:.4f} ± {abl_std[dxy_idx]:.4f}"
+        )
+        print(
+            f"  Bootstrap permutation  : {perm_mean[dxy_idx]:.4f} ± {perm_std[dxy_idx]:.4f}"
+        )
+    
+    # ----------------------------
+    # Summary table (mean ± std)
+    # ----------------------------
+    print("\n" + "=" * 120)
+    print(f"FEATURE IMPORTANCE — {N_RUNS} bootstrap runs  (mean ± std)")
+    print("=" * 120)
+    print(
+        f"{'Feature':<15} {'Gradient':>18} {'Permutation':>18} {'Ablation':>18} {'Fisher':>18} {'KS':>18} {'Combined':>18}"
+    )
+    print("-" * 120)
+    for i in range(n_plot):
+        print(
+            f"{names[i]:<15} "
+            f"{grad_mean[i]:>8.4f}±{grad_std[i]:<8.4f} "
+            f"{perm_mean[i]:>8.4f}±{perm_std[i]:<8.4f} "
+            f"{abl_mean[i]:>8.4f}±{abl_std[i]:<8.4f} "
+            f"{fisher_mean[i]:>8.4f}±{fisher_std[i]:<8.4f} "
+            f"{ks_mean[i]:>8.4f}±{ks_std[i]:<8.4f} "
+            f"{combined_score[i]:>8.4f}±{combined_std[i]:<8.4f}"
+        )
+    top5 = np.argsort(combined_score)[::-1][:5]
+    print(f"\nTop 5 features (combined, {N_RUNS} runs):")
+    for r, i in enumerate(top5, 1):
+        print(f"  {r}. {names[i]}  score={combined_score[i]:.4f} ± {combined_std[i]:.4f}")
+    print(f"\nBaseline AUC: {baseline_auc:.4f} ± {baseline_std_val:.4f}")
+    
+    perm_importance_old_faulty_replaced = True
+    ablation_importance_old_faulty_replaced = True
+    print("\nDone.")
+
+    # ============================================================
+    # PERMUTATION + ABLATION IMPORTANCE BY PARTICLE TYPE
+    # Adds uncertainty estimates for each particle type x feature.
+    # Requires: perm_x, perm_mask, perm_labels, perm_weights, baseline_auc
+    # ============================================================
+    
+    if all_constituents.shape[2] <= 12:
+        print(
+            "Skipping particle-type permutation/ablation: no particle-ID one-hot features found."
+        )
+    else:
+        print("\nComputing permutation + ablation importance by particle type...")
+    
+        # Particle type one-hot is expected in columns 12:17 (5 classes)
+        n_particle_types = min(5, perm_x.shape[2] - 12)
+        ptype_names = globals().get(
+            "PARTICLE_TYPE_NAMES", ["Charged Hadron", "Electron", "Neutral Hadron", "Photon", "Muon"]
+        )
+        ptype_colors = globals().get(
+            "PARTICLE_TYPE_COLORS",
+            ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"][:n_particle_types],
+        )
+    
+        # Features to analyze per type (usually the first 12 physics features)
+        n_type_features = min(12, len(input_feature_names), perm_x.shape[2])
+        type_feature_names = input_feature_names[:n_type_features]
+    
+        # Derive per-constituent particle type and validity
+        ptype_onehot = perm_x[:, :, 12 : 12 + n_particle_types]
+        ptype_idx = torch.argmax(ptype_onehot, dim=-1)  # [n_jets, n_const]
+        has_ptype = ptype_onehot.sum(dim=-1) > 0
+        valid_const = perm_mask & has_ptype
+    
+        # Class row masks for class-conditional permutation
+        sig_row_mask = torch.as_tensor(perm_labels == 1, device=perm_x.device)
+        bkg_row_mask = torch.as_tensor(perm_labels == 0, device=perm_x.device)
+    
+        # Outputs: mean importance and uncertainty (std)
+        perm_by_type = np.zeros((n_particle_types, n_type_features), dtype=np.float64)
+        perm_by_type_std = np.zeros((n_particle_types, n_type_features), dtype=np.float64)
+        abla_by_type = np.zeros((n_particle_types, n_type_features), dtype=np.float64)
+        abla_by_type_std = np.zeros((n_particle_types, n_type_features), dtype=np.float64)
+    
+        # Use whichever permutation count exists in scope
+        n_perm_local = int(globals().get("N_PERMUTATIONS", globals().get("n_permutations", 5)))
+    
+        # Bootstrap count for ablation uncertainty (no extra forward pass; AUC resampling only)
+        n_abla_boot = int(globals().get("N_ABLATION_BOOTSTRAPS", 20))
+        rng_abla = np.random.default_rng(2026)
+    
+        # Baseline scores for ablation uncertainty bootstrap
+        with torch.no_grad():
+            baseline_scores_local = (
+                torch.sigmoid(model(perm_x, particle_mask=perm_mask)["classification"])
+                .squeeze()
+                .cpu()
+                .numpy()
+            )
+    
+        perm_labels_np = np.asarray(perm_labels)
+        perm_weights_np = None if perm_weights is None else np.asarray(perm_weights)
+    
+        def _bootstrap_auc_drop_std(labels, base_scores, pert_scores, weights, n_boot, rng):
+            """Std of (AUC_base - AUC_perturbed) from bootstrap resamples."""
+            if n_boot <= 1:
+                return 0.0
+    
+            labels = np.asarray(labels)
+            base_scores = np.asarray(base_scores)
+            pert_scores = np.asarray(pert_scores)
+            weights_arr = None if weights is None else np.asarray(weights)
+            n = labels.shape[0]
+            drops = []
+    
+            for _ in range(n_boot):
+                # Retry to ensure each resample has both classes
+                for _retry in range(12):
+                    idx = rng.integers(0, n, size=n)
+                    yb = labels[idx]
+                    if np.unique(yb).size < 2:
+                        continue
+    
+                    wb = None if weights_arr is None else weights_arr[idx]
+                    try:
+                        auc_base_bs = roc_auc_score(yb, base_scores[idx], sample_weight=wb)
+                        auc_pert_bs = roc_auc_score(yb, pert_scores[idx], sample_weight=wb)
+                    except ValueError:
+                        continue
+    
+                    drops.append(auc_base_bs - auc_pert_bs)
+                    break
+    
+            if len(drops) <= 1:
+                return 0.0
+            return float(np.std(drops, ddof=1))
+    
+        for pid in range(n_particle_types):
+            type_mask = valid_const & (ptype_idx == pid)  # [n_jets, n_const]
+            if int(type_mask.sum().item()) == 0:
+                continue
+    
+            for f_idx in range(n_type_features):
+                # 1) Class-conditional permutation, but only for this particle type
+                auc_drops = []
+                for _ in range(n_perm_local):
+                    x_perm_t = perm_x.clone()
+    
+                    # Signal class
+                    sel_sig = type_mask & sig_row_mask[:, None]
+                    vals_sig = x_perm_t[:, :, f_idx][sel_sig]
+                    if vals_sig.numel() > 1:
+                        vals_sig = vals_sig[
+                            torch.randperm(vals_sig.numel(), device=perm_x.device)
+                        ]
+                        x_perm_t[:, :, f_idx][sel_sig] = vals_sig
+    
+                    # Background class
+                    sel_bkg = type_mask & bkg_row_mask[:, None]
+                    vals_bkg = x_perm_t[:, :, f_idx][sel_bkg]
+                    if vals_bkg.numel() > 1:
+                        vals_bkg = vals_bkg[
+                            torch.randperm(vals_bkg.numel(), device=perm_x.device)
+                        ]
+                        x_perm_t[:, :, f_idx][sel_bkg] = vals_bkg
+    
+                    with torch.no_grad():
+                        # Recompute mask if pT (feature index 1) was modified
+                        eval_mask = perm_mask if f_idx != 1 else (x_perm_t[:, :, 1] > 0)
+                        s_perm_t = (
+                            torch.sigmoid(
+                                model(x_perm_t, particle_mask=eval_mask)["classification"]
+                            )
+                            .squeeze()
+                            .cpu()
+                            .numpy()
+                        )
+    
+                    auc_perm_t = roc_auc_score(
+                        perm_labels, s_perm_t, sample_weight=perm_weights
+                    )
+                    auc_drops.append(baseline_auc - auc_perm_t)
+    
+                if len(auc_drops) > 0:
+                    perm_by_type[pid, f_idx] = float(np.mean(auc_drops))
+                    perm_by_type_std[pid, f_idx] = (
+                        float(np.std(auc_drops, ddof=1)) if len(auc_drops) > 1 else 0.0
+                    )
+    
+                # 2) Ablation, but only for this particle type
+                x_zero_t = perm_x.clone()
+                x_zero_t[:, :, f_idx][type_mask] = 0.0
+    
+                with torch.no_grad():
+                    eval_mask = perm_mask if f_idx != 1 else (x_zero_t[:, :, 1] > 0)
+                    s_zero_t = (
+                        torch.sigmoid(
+                            model(x_zero_t, particle_mask=eval_mask)["classification"]
+                        )
+                        .squeeze()
+                        .cpu()
+                        .numpy()
+                    )
+    
+                auc_zero_t = roc_auc_score(
+                    perm_labels, s_zero_t, sample_weight=perm_weights
+                )
+                abla_by_type[pid, f_idx] = baseline_auc - auc_zero_t
+                abla_by_type_std[pid, f_idx] = _bootstrap_auc_drop_std(
+                    perm_labels_np,
+                    baseline_scores_local,
+                    s_zero_t,
+                    perm_weights_np,
+                    n_boot=n_abla_boot,
+                    rng=rng_abla,
+                )
+    
+        # ============================================================
+        # Stacked horizontal bars by feature:
+        # each bar = sum of colored particle-type contributions
+        # Adds total uncertainty bars from per-type uncertainties in quadrature.
+        # ============================================================
+    
+        # Accept either variable naming
+        if "perm_by_type" not in globals():
+            if "permutation_importance_by_particle_type" in globals():
+                perm_by_type = np.asarray(
+                    permutation_importance_by_particle_type, dtype=float
+                )
+            else:
+                raise RuntimeError(
+                    "Need perm_by_type or permutation_importance_by_particle_type in scope."
+                )
+    
+        if "abla_by_type" not in globals():
+            if "ablation_importance_by_particle_type" in globals():
+                abla_by_type = np.asarray(ablation_importance_by_particle_type, dtype=float)
+            else:
+                raise RuntimeError(
+                    "Need abla_by_type or ablation_importance_by_particle_type in scope."
+                )
+    
+        if "perm_by_type_std" not in globals():
+            if "permutation_importance_uncertainty_by_particle_type" in globals():
+                perm_by_type_std = np.asarray(
+                    permutation_importance_uncertainty_by_particle_type, dtype=float
+                )
+            else:
+                perm_by_type_std = np.zeros_like(perm_by_type, dtype=float)
+    
+        if "abla_by_type_std" not in globals():
+            if "ablation_importance_uncertainty_by_particle_type" in globals():
+                abla_by_type_std = np.asarray(
+                    ablation_importance_uncertainty_by_particle_type, dtype=float
+                )
+            else:
+                abla_by_type_std = np.zeros_like(abla_by_type, dtype=float)
+    
+        if "type_feature_names" not in globals():
+            if "particle_type_feature_names" in globals():
+                type_feature_names = list(particle_type_feature_names)
+            else:
+                raise RuntimeError(
+                    "Need type_feature_names or particle_type_feature_names in scope."
+                )
+    
+        if "ptype_names" not in globals():
+            ptype_names = ["Charged Hadron", "Electron", "Neutral Hadron", "Photon", "Muon"]
+    
+        if "ptype_colors" not in globals():
+            default_colors = [
+                "#1f77b4",
+                "#ff7f0e",
+                "#2ca02c",
+                "#d62728",
+                "#9467bd",
+                "#8c564b",
+                "#e377c2",
+            ]
+            ptype_colors = default_colors[: perm_by_type.shape[0]]
+    
+        def plot_stacked_particle_contrib(
+            contrib_by_type,
+            feature_names,
+            type_names,
+            type_colors,
+            title,
+            xlabel,
+            contrib_std_by_type=None,
+        ):
+            """
+            contrib_by_type: shape [n_types, n_features]
+            Stacks positive contributions to the right and negative to the left of zero.
+            The algebraic total per feature is the sum across all particle types.
+            If contrib_std_by_type is given, total uncertainty is drawn in quadrature.
+            """
+            contrib_by_type = np.asarray(contrib_by_type, dtype=float)
+            totals = contrib_by_type.sum(
+                axis=0
+            )  # total drop per feature (sum of colors)
+    
+            totals_std = None
+            if contrib_std_by_type is not None:
+                contrib_std_by_type = np.asarray(contrib_std_by_type, dtype=float)
+    
+            # Sort features by total contribution
+            order = np.argsort(totals)[::-1]
+            totals = totals[order]
+            feat_sorted = [rf"${feature_names[i]}$" for i in order]
+            C = contrib_by_type[:, order]
+    
+            if contrib_std_by_type is not None:
+                S = contrib_std_by_type[:, order]
+                totals_std = np.sqrt(np.sum(S ** 2, axis=0))
+    
+            y = np.arange(len(feat_sorted))
+            pos_base = np.zeros(len(feat_sorted), dtype=float)
+            neg_base = np.zeros(len(feat_sorted), dtype=float)
+    
+            fig, ax = plt.subplots(figsize=(11, max(6, 0.5 * len(feat_sorted))))
+    
+            for t in range(C.shape[0]):
+                vals = C[t]
+                left = np.where(vals >= 0, pos_base, neg_base)
+                ax.barh(
+                    y,
+                    vals,
+                    left=left,
+                    color=type_colors[t],
+                    alpha=0.88,
+                    label=type_names[t],
+                    edgecolor="white",
+                    linewidth=0.5,
+                )
+                pos_base += np.where(vals >= 0, vals, 0.0)
+                neg_base += np.where(vals < 0, vals, 0.0)
+    
+            # Total marker (sum over particle types)
+            ax.scatter(
+                totals, y, marker="|", s=260, color="black", zorder=4, label="Total (sum)"
+            )
+    
+            if totals_std is not None:
+                ax.errorbar(
+                    totals,
+                    y,
+                    xerr=totals_std,
+                    fmt="none",
+                    ecolor="black",
+                    elinewidth=1.1,
+                    capsize=2,
+                    alpha=0.9,
+                    zorder=5,
+                    label="Total uncertainty",
+                )
+    
+            ax.axvline(0.0, color="black", linestyle="--", alpha=0.65)
+            ax.set_yticks(y)
+            ax.set_yticklabels(feat_sorted)
+            ax.set_xlabel(xlabel)
+            ax.set_title(title)
+            ax.invert_yaxis()
+            ax.grid(axis="x", alpha=0.25)
+            ax.legend(loc="best", fontsize=9)
+            plt.tight_layout()
+            plt.show()
+    
+            # Optional printed check
+            print(f"\n{title}")
+            print("-" * len(title))
+            for i, f in enumerate(feat_sorted):
+                if totals_std is None:
+                    print(f"{f:<14} total={totals[i]:+0.5f}")
+                else:
+                    print(
+                        f"{f:<14} total={totals[i]:+0.5f} +/- {totals_std[i]:0.5f}"
+                    )
+            return fig
+    
+        def plot_particle_type_uncertainty_heatmap(
+            std_by_type, feature_names, type_names, title, cbar_label="Std(AUC drop)"
+        ):
+            """Heatmap of uncertainty for each particle-type x feature cell."""
+            U = np.asarray(std_by_type, dtype=float)
+            feat_labels = [rf"${f}$" for f in feature_names]
+    
+            fig, ax = plt.subplots(
+                figsize=(max(9, 1.0 * len(feat_labels)), max(3.8, 1.0 * len(type_names)))
+            )
+            im = ax.imshow(U, aspect="auto", cmap="YlOrRd")
+    
+            ax.set_xticks(np.arange(len(feat_labels)))
+            ax.set_xticklabels(feat_labels, rotation=45, ha="right")
+            ax.set_yticks(np.arange(len(type_names)))
+            ax.set_yticklabels(type_names)
+            ax.set_title(title)
+    
+            finite_vals = U[np.isfinite(U)]
+            threshold = 0.5 * float(np.max(finite_vals)) if finite_vals.size > 0 else 0.0
+            for i in range(U.shape[0]):
+                for j in range(U.shape[1]):
+                    val = U[i, j]
+                    if not np.isfinite(val):
+                        txt = "nan"
+                        color = "black"
+                    else:
+                        txt = f"{val:.3f}"
+                        color = "white" if val > threshold else "black"
+                    ax.text(j, i, txt, ha="center", va="center", fontsize=14, color=color)
+    
+            cbar = fig.colorbar(im, ax=ax, pad=0.02)
+            cbar.set_label(cbar_label)
+            plt.tight_layout()
+            plt.show()
+            return fig
+    
+        # Plot 1: permutation by particle type (stacked + total uncertainty)
+        fig_stacked_perm = plot_stacked_particle_contrib(
+            perm_by_type,
+            type_feature_names,
+            ptype_names,
+            ptype_colors,
+            "Permutation Importance by Feature (Stacked by Particle Type)",
+            "AUC Drop When Permuted",
+            contrib_std_by_type=perm_by_type_std,
+        )
+    
+        # Plot 2: ablation by particle type (stacked + total uncertainty)
+        fig_stacked_ablate = plot_stacked_particle_contrib(
+            abla_by_type,
+            type_feature_names,
+            ptype_names,
+            ptype_colors,
+            "Ablation Importance by Feature (Stacked by Particle Type)",
+            "AUC Drop When Zeroed",
+            contrib_std_by_type=abla_by_type_std,
+        )
+    
+        # Plot 3/4: explicit uncertainty maps by particle type and feature
+        fig_unc_perm = plot_particle_type_uncertainty_heatmap(
+            perm_by_type_std,
+            type_feature_names,
+            ptype_names,
+            "Permutation Uncertainty by Particle Type and Feature",
+            cbar_label="Std(AUC Drop) across permutations",
+        )
+    
+        fig_unc_ablate = plot_particle_type_uncertainty_heatmap(
+            abla_by_type_std,
+            type_feature_names,
+            ptype_names,
+            "Ablation Uncertainty by Particle Type and Feature",
+            cbar_label="Std(AUC Drop) from bootstrap",
+        )
+    
+        # Optional compact summary printout
+        print("\nTop 3 features by particle type (Permutation / Ablation):")
+        for pid in range(n_particle_types):
+            p_top = np.argsort(perm_by_type[pid])[::-1][:3]
+            a_top = np.argsort(abla_by_type[pid])[::-1][:3]
+            p_txt = ", ".join(
+                [
+                    f"{type_feature_names[i]} ({perm_by_type[pid, i]:+.4f} +/- {perm_by_type_std[pid, i]:.4f})"
+                    for i in p_top
+                ]
+            )
+            a_txt = ", ".join(
+                [
+                    f"{type_feature_names[i]} ({abla_by_type[pid, i]:+.4f} +/- {abla_by_type_std[pid, i]:.4f})"
+                    for i in a_top
+                ]
+            )
+            print(f"  {ptype_names[pid]}:")
+            print(f"    Permute: {p_txt}")
+            print(f"    Ablate : {a_txt}")
+    
+        # Keep in memory for later cells
+        permutation_importance_by_particle_type = perm_by_type
+        ablation_importance_by_particle_type = abla_by_type
+        permutation_importance_uncertainty_by_particle_type = perm_by_type_std
+        ablation_importance_uncertainty_by_particle_type = abla_by_type_std
+        particle_type_feature_names = type_feature_names
+    
+        print("\nStored arrays:")
+        print(
+            "  permutation_importance_by_particle_type                shape =",
+            permutation_importance_by_particle_type.shape,
+        )
+        print(
+            "  ablation_importance_by_particle_type                   shape =",
+            ablation_importance_by_particle_type.shape,
+        )
+        print(
+            "  permutation_importance_uncertainty_by_particle_type    shape =",
+            permutation_importance_uncertainty_by_particle_type.shape,
+        )
+        print(
+            "  ablation_importance_uncertainty_by_particle_type       shape =",
+            ablation_importance_uncertainty_by_particle_type.shape,
+        )
+    
+        save_fig(fig_stacked_perm, "stacked_permutation_importance_by_particle_type_unc")
+        save_fig(fig_stacked_ablate, "stacked_ablation_importance_by_particle_type_unc")
+        save_fig(fig_unc_perm, "permutation_uncertainty_by_particle_type")
+        save_fig(fig_unc_ablate, "ablation_uncertainty_by_particle_type")
+        print(
+            "Saved stacked and uncertainty plots for permutation and ablation importance by particle type."
+        )
+        print("Done with particle-type-specific permutation and ablation importance.")
+
     # Restore full arrays for downstream full-profile sections.
     all_labels = _all_labels_full
     all_outputs = _all_outputs_full
@@ -6668,6 +7705,7 @@ def main():
     if not should_run(args.profile, "full"):
         print("\nAll analysis complete!")
         return
+
 
     # # ── Full profile parity: AK8 H-tagging + AK8 di-Higgs sections ───
     # print("\n" + "=" * 70)

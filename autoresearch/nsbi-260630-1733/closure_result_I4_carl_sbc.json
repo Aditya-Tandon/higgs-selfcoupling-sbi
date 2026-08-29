@@ -1,0 +1,49 @@
+{
+  "method": "weighted_carl+sbc_calibrated",
+  "n_sm": 50000,
+  "delta_star": 203.46131835937499,
+  "recovery": {
+    "0.0": {
+      "mle": -1.0,
+      "lo": -1.0,
+      "hi": 1.2944444444444443,
+      "inside": true
+    },
+    "1.0": {
+      "mle": 1.0222222222222221,
+      "lo": 0.3222222222222222,
+      "hi": 1.6055555555555556,
+      "inside": true
+    },
+    "2.45": {
+      "mle": 2.772222222222222,
+      "lo": 1.9944444444444445,
+      "hi": 3.666666666666667,
+      "inside": true
+    },
+    "5.0": {
+      "mle": 5.222222222222222,
+      "lo": 4.25,
+      "hi": 6.0,
+      "inside": true
+    }
+  },
+  "n_inside": 4,
+  "coverage": 0.6825,
+  "gate_recovery": true,
+  "gate_coverage": true,
+  "gate_pass": true,
+  "config": {
+    "files": "data/hh4b/data_*.root",
+    "max_files": null,
+    "kl_low": -1.0,
+    "kl_high": 6.0,
+    "n_steps": 8000,
+    "batch": 4096,
+    "n_obs": 2000,
+    "n_cal": 400,
+    "n_cov": 400,
+    "outdir": "autoresearch/nsbi-260630-1733",
+    "seed": 0
+  }
+}

@@ -1,0 +1,194 @@
+{
+  "physics": {
+    "luminosity_fb": 1000,
+    "signal_xsec_pb": 0.01244,
+    "n_gen_signal": 50000
+  },
+  "file_pattern": "data/hh4b/data_*.root",
+  "tree_name": "Events",
+  "max_events": null,
+  "matching_cone_size": 0.4,
+  "gen": {
+    "collection_name": "GenPart",
+    "pt_cut": 20.0,
+    "eta_cut": 2.3
+  },
+  "load_masks_from_file": true,
+  "offline": {
+    "collection_name": "Jet",
+    "tagger_name": "btagPNetB",
+    "cvb_tagger_name": "btagPNetCvB",
+    "b_tag_cut": 0.1055,
+    "charm_veto_cut": 1.0,
+    "electron_veto_cut": 1.0,
+    "muon_veto_cut": 1.0,
+    "pt_cut": 25.0,
+    "eta_cut": 2.4
+  },
+  "upart": {
+    "collection_name": "Jet",
+    "tagger_name": "btagUParTAK4B",
+    "cvb_tagger_name": "btagPNetCvB",
+    "b_tag_cut": 0.11122,
+    "charm_veto_cut": 1.0,
+    "electron_veto_cut": 1.0,
+    "muon_veto_cut": 1.0,
+    "pt_cut": 25.0,
+    "eta_cut": 2.4
+  },
+  "l1ng": {
+    "collection_name": "L1puppiJetSC4NG",
+    "tagger_name": "b_v_udscg_score",
+    "cvb_tagger_name": "c_v_b_score",
+    "b_tag_cut": 0.1774,
+    "charm_veto_cut": 1.0,
+    "electron_veto_cut": 1.0,
+    "muon_veto_cut": 1.0,
+    "pt_cut": 25.0,
+    "eta_cut": 2.4
+  },
+  "l1ext": {
+    "collection_name": "L1puppiExtJetSC4",
+    "tagger_name": "btagScore",
+    "b_tag_cut": 0.7379,
+    "pt_cut": 25.0,
+    "eta_cut": 2.4
+  },
+  "l1barrelextpuppi": {
+    "collection_name": "L1BarrelExtPuppi",
+    "tagger_name": "btagScore",
+    "b_tag_cut": 0.0,
+    "pt_cut": 0.0,
+    "eta_cut": 2.4,
+    "jet_pt_cut": 25.0,
+    "jet_eta_cut": 2.4
+  },
+  "l1extpuppi": {
+    "collection_name": "L1ExtPuppi",
+    "tagger_name": "btagScore",
+    "b_tag_cut": 0.0,
+    "pt_cut": 0.0,
+    "eta_cut": 2.4,
+    "jet_pt_cut": 25.0,
+    "jet_eta_cut": 2.4
+  },
+  "l1barrelextpf": {
+    "collection_name": "L1BarrelExtPf",
+    "tagger_name": "btagScore",
+    "b_tag_cut": 0.0,
+    "pt_cut": 0.0,
+    "eta_cut": 2.4,
+    "jet_pt_cut": 25.0,
+    "jet_eta_cut": 2.4
+  },
+  "l1extpf": {
+    "collection_name": "L1ExtPf",
+    "tagger_name": "btagScore",
+    "b_tag_cut": 0.0,
+    "pt_cut": 0.0,
+    "eta_cut": 2.4,
+    "jet_pt_cut": 25.0,
+    "jet_eta_cut": 2.4
+  },
+  "QCD_background": {
+    "qcd_pt_20_30": {
+      "file_pattern": "data/QCD_Pt-20To30/data_*.root",
+      "tree_name": "Events",
+      "max_events": null,
+      "weight": 432900000.0,
+      "n_gen": 471000,
+      "pt_range": [
+        20,
+        30
+      ]
+    },
+    "qcd_pt_30_50": {
+      "file_pattern": "data/QCD_Pt-30To50/data_*.root",
+      "tree_name": "Events",
+      "max_events": null,
+      "weight": 117200000.0,
+      "n_gen": 483000,
+      "pt_range": [
+        30,
+        50
+      ]
+    },
+    "qcd_pt_50_80": {
+      "file_pattern": "data/QCD_Pt-50To80/data_*.root",
+      "tree_name": "Events",
+      "max_events": null,
+      "weight": 17490000.0,
+      "n_gen": 298000,
+      "pt_range": [
+        50,
+        80
+      ]
+    },
+    "qcd_pt_80_120": {
+      "file_pattern": "data/QCD_Pt-80To120/data_*.root",
+      "tree_name": "Events",
+      "max_events": null,
+      "weight": 2657000.0,
+      "n_gen": 148000,
+      "pt_range": [
+        80,
+        120
+      ]
+    },
+    "qcd_pt_120_170": {
+      "file_pattern": "data/QCD_Pt-120To170/data_*.root",
+      "tree_name": "Events",
+      "max_events": null,
+      "weight": 467800.0,
+      "n_gen": 99000,
+      "pt_range": [
+        120,
+        170
+      ]
+    },
+    "qcd_pt_170_300": {
+      "file_pattern": "data/QCD_Pt-170To300/data_*.root",
+      "tree_name": "Events",
+      "max_events": null,
+      "weight": 120300.0,
+      "n_gen": 99000,
+      "pt_range": [
+        170,
+        300
+      ]
+    },
+    "qcd_pt_300_470": {
+      "file_pattern": "data/QCD_Pt-300To470/data_*.root",
+      "tree_name": "Events",
+      "max_events": null,
+      "weight": 8157.0,
+      "n_gen": 99000,
+      "pt_range": [
+        300,
+        470
+      ]
+    },
+    "qcd_pt_470_600": {
+      "file_pattern": "data/QCD_Pt-470To600/data_*.root",
+      "tree_name": "Events",
+      "max_events": null,
+      "weight": 683.1,
+      "n_gen": 97000,
+      "pt_range": [
+        470,
+        600
+      ]
+    },
+    "qcd_pt_600_inf": {
+      "file_pattern": "data/QCD_Pt-600ToInf/data_*.root",
+      "tree_name": "Events",
+      "max_events": null,
+      "weight": 241.0,
+      "n_gen": 93000,
+      "pt_range": [
+        600,
+        "inf"
+      ]
+    }
+  }
+}

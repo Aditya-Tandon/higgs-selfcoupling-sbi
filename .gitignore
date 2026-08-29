@@ -11,4 +11,10 @@ conf/
 *.log
 *.pbs.*
 *.pbs
-*.png
+*.png.vault
+.claude/skills/
+.claude/commands/autoresearch
+autoresearch/
+logs/
+*.pbs.o*
+*.pbs.e*

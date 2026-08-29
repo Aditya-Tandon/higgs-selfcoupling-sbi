@@ -81,6 +81,13 @@ def run_training(cfg):
 
     # Data
     dataset = StratifiedJetDataset(cfg["training"]["data"]["data_path"])
+    # Feature ablation (Dir-2 Stage-2 H-PF-return control): zero the listed
+    # feature columns, e.g. [4, 5] = (dxy, z0), before any split.
+    zero_cols = cfg["training"]["data"].get("zero_feature_cols")
+    if zero_cols:
+        assert dataset.X is not None, "zero_feature_cols needs eager (npz) mode"
+        dataset.X[:, :, zero_cols] = 0.0
+        print(f"Feature ablation: zeroed columns {zero_cols}")
     train_ds, val_ds, train_indices, val_indices, train_labels = stratified_split(
         dataset, cfg["training"]["data"]["val_split"], num_classes=1
     )
@@ -184,6 +191,31 @@ def run_training(cfg):
         if is_main(rank):
             print("Loaded model & optimiser from W&B artifact")
 
+    # Fine-tune init: load model weights ONLY from a local checkpoint (fresh optimiser +
+    # scheduler), for adapting a pretrained classifier to a new (e.g. preselected) phase space.
+    init_ckpt = cfg["training"].get("init_ckpt")
+    if init_ckpt and not restart:
+        ck = torch.load(init_ckpt, map_location=device, weights_only=False)
+        state = ck["model_state_dict"] if isinstance(ck, dict) and "model_state_dict" in ck else ck
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        model.to(device)
+        if is_main(rank):
+            print(f"Fine-tune init from {init_ckpt} "
+                  f"(missing={len(missing)}, unexpected={len(unexpected)})")
+
+    # Local resume: continue a run from a LOCAL checkpoint (model + optimiser + scheduler +
+    # epoch) without W&B, for picking up offline training cut off at a walltime limit. Unlike
+    # init_ckpt this preserves the optimiser state and LR schedule (no fresh warmup).
+    resume_ckpt = cfg["training"].get("resume_ckpt")
+    resume_state = None
+    if resume_ckpt and not restart:
+        resume_state = torch.load(resume_ckpt, map_location=device, weights_only=False)
+        model.load_state_dict(resume_state["model_state_dict"])
+        model.to(device)
+        optimiser.load_state_dict(resume_state["optimiser_state_dict"])
+        if is_main(rank):
+            print(f"Resuming from {resume_ckpt} at epoch {resume_state['epoch'] + 1}")
+
     # DDP wrapping (after checkpoint load so state_dict keys match)
     if distributed:
         dist_cfg = cfg.get("training", {}).get("distributed", {})
@@ -208,6 +240,8 @@ def run_training(cfg):
         red_fac=cfg["training"]["scheduler"]["red_fac"],
         last_epoch=cfg["training"]["last_epoch_in_prev_run"] if restart else -1,
     )
+    if resume_state is not None and "scheduler_state_dict" in resume_state:
+        scheduler.load_state_dict(resume_state["scheduler_state_dict"])
 
     # Loss
     pos_weight = torch.tensor(cfg["training"]["pos_weight"], device=device)
@@ -222,6 +256,8 @@ def run_training(cfg):
     # Training loop
     best_auc = 0.0
     start_epoch = cfg["training"]["last_epoch_in_prev_run"] if restart else 0
+    if resume_state is not None:
+        start_epoch = resume_state["epoch"] + 1
     num_epochs = start_epoch + cfg["training"]["epochs"]
 
     if is_main(rank):
