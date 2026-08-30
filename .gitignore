@@ -18,3 +18,17 @@ autoresearch/
 logs/
 *.pbs.o*
 *.pbs.e*
+
+# Internal / HPC-specific
+autoresearch/
+*.pbs
+config_event_ft_*.json
+config_event_pf_finetune.json
+config_event_pf_resume.json
+config_part_pf.json
+config_part_test.json
+grok_config.json
+hh-bbbb-obj-config-hpc.json
+hh-bbbb-obj-config-true.json
+test_trained_part_old.py
+artifact_evolution.py
