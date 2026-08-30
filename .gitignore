@@ -32,3 +32,4 @@ hh-bbbb-obj-config-hpc.json
 hh-bbbb-obj-config-true.json
 test_trained_part_old.py
 artifact_evolution.py
+notebooks/b-tagging.ipynb
