@@ -60,20 +60,80 @@ Stage 3 — Neural SBI: LO reweighting → weighted-CARL → profile likelihood 
 ## Repository structure
 
 ```
-model/           Particle Transformer implementation and LR scheduler
-data_pipeline/   ROOT → .npz dataset builders, jet matching, splitting
-evaluation/      ROC, efficiency, resolution, di-Higgs reconstruction, feature importance
-plotting/        Visualisation
-sbi/             Neural SBI pipeline for κ_λ
-  kl_reweight.py         Analytic LO gg→HH reweighting (forward model)
-  snre.py                Weighted-CARL / SNRE-B ratio estimator
-  closure_kl.py          Closure test (unbinned, iteration 1)
-  closure_kl_v2.py       Closure test (binned extended likelihood, real observables)
+config_event.json              Event-level training config (PUPPI constituents)
+config_event_pf.json           Event-level training config (PF constituents)
+config_part.json               Jet-level ParT training config
+focal_loss.py                  Focal loss for class-imbalanced training
+hep-root-ml-clean.yml          Conda environment specification
+hh-bbbb-obj-config.json        L1 object performance evaluation config
+multiplicity_stats.py          Constituent multiplicity statistics per jet flavour
+test_trained_part.py           Evaluate a trained jet-level ParT checkpoint
+train_event.py                 Event-level HH-vs-QCD training (DDP, local resume)
+train_part.py                  Jet-level b-tagging training (single or multi-GPU)
+wandb_utils.py                 Weights & Biases logging helpers
+
+model/
+  parT.py                      Particle Transformer architecture
+  ddp_helpers.py               Distributed Data Parallel utilities
+  warmup_cosine_lr.py          Cosine-annealing LR scheduler with linear warmup
+
+data_pipeline/
+  root_loading.py              Read ROOT ntuples via uproot into awkward arrays
+  make_particle_dataset.py     Build jet-level .npz datasets from ROOT files
+  make_event_dataset.py        Build event-level .npz datasets with trigger emulation
+  combined_loader.py           Merge multiple .npz shards into a single DataLoader
+  datasets.py                  PyTorch Dataset wrappers for particle and event data
+  matching.py                  ΔR jet matching between L1 and HLT collections
+  splitting.py                 Train/val/test splitting with per-class balancing
+  cache_reference_taggers.py   Cache offline tagger scores for reference comparisons
+
+evaluation/
+  roc.py                       ROC curves, AUC, and working-point extraction
+  efficiency.py                Trigger and tagging efficiency vs pT/η
+  resolution.py                Jet energy scale and resolution (L1 vs HLT)
+  dihiggs.py                   Di-Higgs mass reconstruction and κ_λ reweighting checks
+  jet_matching.py              Evaluate L1-to-HLT jet matching purity
+  attention.py                 Extract and summarise ParT attention maps
+  feature_importance.py        Permutation feature importance for trained models
+  luminosity.py                Integrated-luminosity scaling utilities
+
+plotting/
+  base.py                      Shared plot style and helper functions
+  roc_plots.py                 ROC and score-distribution figures
+  resolution_plots.py          Energy scale/resolution figures
+  dihiggs_plots.py             Di-Higgs mass and signal/background overlay plots
+  attention_plots.py           Attention-map visualisations
+  feature_importance_plots.py  Feature importance bar charts
+
+sbi/
+  kl_reweight.py               Analytic LO gg→HH reweighting (forward model)
+  snre.py                      Weighted-CARL / SNRE-B ratio estimator
+  build_nsbi_cache.py          Row-aligned observable cache (scores + reco/gen m_HH)
+  verify_nsbi_cache.py         Sanity checks on the NSBI cache
+  validate_reweight.py         Validate reweighting against σ(κ_λ) quadratic
+  closure_kl.py                Closure test (unbinned, first iteration)
+  closure_kl_v2.py             Closure test (binned extended likelihood, real observables)
   diagnose_discrimination.py   S/√B decomposition by QCD pT bin
-  fisher_info.py         Per-event κ_λ Fisher information
-  selection_scan.py      72-point selection grid scan
-train_part.py    Jet-level training (single or multi-GPU via torchrun)
-train_event.py   Event-level training (DDP, local resume)
+  fisher_info.py               Per-event κ_λ Fisher information
+  info_acceptance_map.py       Fisher information vs acceptance 2D map
+  selection_scan.py            72-point selection grid scan over score and pT thresholds
+  eval_presel_inmem.py         In-memory evaluation of preselection strategies
+  eval_finetune.py             Evaluate finetuned event classifier on SBI task
+  abcd_qcd_closure.py          ABCD data-driven QCD background closure test
+  dir8_offline_tagger_control.py  Control study using offline tagger scores
+  linear_probe_pf.py           Linear probe on PF constituent embeddings
+  transfer_3b4b.py             Transfer learning from 3b to 4b channel
+  oom_kl.py                    Out-of-memory-safe KL reweighting variant
+
+notebooks/
+  b-tagging.ipynb              Jet-level b-tagging analysis and figures
+  eval_event_classifier.ipynb  Event classifier evaluation and score distributions
+  test_trained_part.ipynb      Interactive checkpoint evaluation
+  read-data.ipynb              ROOT file exploration and sanity checks
+
+tests/
+  test_parT.py                 Unit tests for Particle Transformer forward pass
+  test_event_features.py       Unit tests for event-level feature construction
 ```
 
 ---
