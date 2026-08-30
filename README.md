@@ -126,7 +126,6 @@ sbi/
   oom_kl.py                    Out-of-memory-safe KL reweighting variant
 
 notebooks/
-  b-tagging.ipynb              Jet-level b-tagging analysis and figures
   eval_event_classifier.ipynb  Event classifier evaluation and score distributions
   test_trained_part.ipynb      Interactive checkpoint evaluation
   read-data.ipynb              ROOT file exploration and sanity checks
@@ -192,7 +191,7 @@ python sbi/diagnose_discrimination.py --cache data/event_level/nsbi_cache.npz
 
 ### Notebooks
 
-Interactive analysis and figures live in `notebooks/` (`b-tagging.ipynb`, `eval_event_classifier.ipynb`, `test_trained_part.ipynb`, `read-data.ipynb`). These should be run with the `hep-root-ml` kernel.
+Interactive analysis and figures live in `notebooks/` (`eval_event_classifier.ipynb`, `test_trained_part.ipynb`, `read-data.ipynb`). These should be run with the `hep-root-ml` kernel.
 
 ---
 
